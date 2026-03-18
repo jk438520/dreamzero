@@ -143,6 +143,17 @@ class WANPolicyHeadConfig(PretrainedConfig):
     image_encoder_cfg: dict = field(default=None)
     vae_cfg: dict = field(default=None)
 
+    # Value head (auxiliary task progress prediction via flow matching)
+    value_loss_coeff: float = field(
+        default=1.0, metadata={"help": "Loss coefficient for value head."}
+    )
+    num_value_per_block: int = field(
+        default=1, metadata={"help": "Number of value tokens per block."}
+    )
+    value_dim: int = field(
+        default=1, metadata={"help": "Dimension of value prediction (1 for scalar task progress)."}
+    )
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         for key, value in kwargs.items():
@@ -342,6 +353,8 @@ class WANPolicyHead(ActionHead):
             self.model.state_encoder.requires_grad_(True)
             self.model.action_encoder.requires_grad_(True)
             self.model.action_decoder.requires_grad_(True)
+            self.model.value_encoder.requires_grad_(True)
+            self.model.value_decoder.requires_grad_(True)
         elif self.train_architecture == "lora" and self.defer_lora_injection:
             print("Deferring LoRA injection until after pretrained weights are loaded")
         else:
@@ -390,6 +403,8 @@ class WANPolicyHead(ActionHead):
             self.model.state_encoder.requires_grad_(True)
             self.model.action_encoder.requires_grad_(True)
             self.model.action_decoder.requires_grad_(True)
+            self.model.value_encoder.requires_grad_(True)
+            self.model.value_decoder.requires_grad_(True)
             # self.model.registers.requires_grad_(True)
             # self.model.time_modality_projection.requires_grad_(True)
             
@@ -719,17 +734,65 @@ class WANPolicyHead(ActionHead):
             noisy_actions = None
             training_target_action = None
 
+        # ============ VALUE HEAD: compute ground truth and noise ============
+        if actions.numel() > 0:
+            num_value_per_block = getattr(self.config, 'num_value_per_block', 1)
+            value_dim = getattr(self.config, 'value_dim', 1)
+            actions_per_block = self.model.num_action_per_block // self.num_frame_per_block
+            num_blocks = actions.shape[1] // actions_per_block
+
+            # Use real task progress from the data pipeline (frame_index / episode_length)
+            if hasattr(action_input, 'task_progress') and action_input.task_progress is not None:
+                # task_progress shape: [B, action_horizon, 1]
+                raw_progress = action_input.task_progress.to(device=self._device, dtype=actions.dtype)
+                # Subsample to per-block: take last action step of each block
+                block_end_indices = torch.arange(
+                    actions_per_block - 1, raw_progress.shape[1], actions_per_block,
+                    device=self._device
+                )[:num_blocks]
+                task_progress = raw_progress[:, block_end_indices, :value_dim]
+            else:
+                # Fallback: synthetic linear ramp (for datasets without frame_index)
+                progress_per_block = torch.linspace(
+                    1.0 / num_blocks, 1.0, num_blocks, device=self._device, dtype=actions.dtype
+                )
+                task_progress = progress_per_block.unsqueeze(0).unsqueeze(-1).expand(
+                    actions.shape[0], num_blocks, value_dim
+                )
+
+            # Expand for num_value_per_block > 1
+            if num_value_per_block > 1:
+                task_progress = task_progress.repeat_interleave(num_value_per_block, dim=1)
+
+            noise_value = torch.randn_like(task_progress)
+            timestep_value_id = torch.randint(
+                0, self.scheduler.num_train_timesteps,
+                (task_progress.shape[0], task_progress.shape[1])
+            )
+            timestep_value = self.scheduler.timesteps[timestep_value_id].to(self._device)
+            noisy_value = self.scheduler.add_noise(
+                task_progress.flatten(0, 1),
+                noise_value.flatten(0, 1),
+                timestep_value.flatten(0, 1),
+            ).unflatten(0, (task_progress.shape[0], task_progress.shape[1]))
+            training_target_value = self.scheduler.training_target(task_progress, noise_value, timestep_value)
+        else:
+            noisy_value = None
+            timestep_value = None
+            training_target_value = None
+
         # Compute loss
         with torch.amp.autocast(dtype=torch.bfloat16, device_type=torch.device(self._device).type):
             if actions.numel() > 0:
-                video_noise_pred, action_noise_pred = self.model(
+                video_noise_pred, action_noise_pred, value_noise_pred = self.model(
                     noisy_latents.transpose(1, 2), timestep=timestep, clip_feature=clip_feas, y=ys, context=prompt_embs, seq_len=seq_len,
                     state=state_features, embodiment_id=embodiment_id,
                     action=noisy_actions, timestep_action=timestep_action, 
                     clean_x=latents.transpose(1, 2),
+                    value=noisy_value, timestep_value=timestep_value,
                 )
             else:
-                video_noise_pred, action_noise_pred = self.model(
+                video_noise_pred, action_noise_pred, value_noise_pred = self.model(
                     noisy_latents.transpose(1, 2), timestep=timestep, timestep_action=timestep_action, 
                     clip_feature=clip_feas, y=ys, context=prompt_embs, seq_len=seq_len,
                     state=state_features, embodiment_id=embodiment_id,
@@ -757,6 +820,20 @@ class WANPolicyHead(ActionHead):
             else:
                 weighted_action_loss = torch.tensor(0.0, device=self._device)
                 loss = weighted_dynamics_loss
+
+            # Value head loss (flow matching on task progress)
+            if actions.numel() > 0 and value_noise_pred is not None:
+                value_loss_coeff = getattr(self.config, 'value_loss_coeff', 1.0)
+                value_loss_per_sample = torch.nn.functional.mse_loss(
+                    value_noise_pred.float(), training_target_value.float(), reduction='none'
+                )
+                weight_value = value_loss_per_sample.mean(dim=2) * self.scheduler.training_weight(
+                    timestep_value.flatten(0, 1),
+                ).unflatten(0, (task_progress.shape[0], task_progress.shape[1])).to(self._device)
+                weighted_value_loss = weight_value.mean() * value_loss_coeff
+                loss = loss + weighted_value_loss
+            else:
+                weighted_value_loss = torch.tensor(0.0, device=self._device)
             # loss = dynamics_loss_per_sample.mean()
 
         # Record log
@@ -764,6 +841,7 @@ class WANPolicyHead(ActionHead):
             "loss": loss,
             "dynamics_loss": weighted_dynamics_loss,
             "action_loss": weighted_action_loss,
+            "value_loss": weighted_value_loss,
         }
 
         return BatchFeature(data=output_dict)

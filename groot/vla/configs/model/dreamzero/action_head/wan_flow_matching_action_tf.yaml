@@ -74,6 +74,8 @@ action_head_cfg:
       num_frame_per_block: ${num_frame_per_block}
       num_action_per_block: ${num_action_per_block}
       num_state_per_block: ${num_state_per_block}
+      num_value_per_block: 1
+      value_dim: 1
     text_encoder_cfg:
       _target_: groot.vla.model.dreamzero.modules.wan_video_text_encoder.WanTextEncoder
       _convert_: object
@@ -106,3 +108,8 @@ action_head_cfg:
 
     tune_projector: true
     tune_diffusion_model: true
+
+    # ========== VALUE HEAD CONFIG ==========
+    value_loss_coeff: 1.0
+    num_value_per_block: 1
+    value_dim: 1
