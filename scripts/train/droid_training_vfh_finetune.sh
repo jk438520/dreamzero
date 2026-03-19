@@ -1,17 +1,16 @@
 #!/bin/bash
-# DreamZero DROID Full Fine-Tuning Script (8x H100, ZeRO-2 + CPU Offload)
+# DreamZero DROID VFH Fine-Tuning Script
+#
+# Loads an older checkpoint (without VFH), then trains:
+#   - VFH (value head) fully, and
+#   - the rest either with LoRA (default) or fully frozen.
 #
 # Usage:
-#   bash scripts/train/droid_training_full_finetune.sh
+#   bash scripts/train/droid_training_vfh_finetune.sh
 #
-# Prerequisites:
-#   - DROID dataset in LeRobot format at DROID_DATA_ROOT
-#     Download: huggingface-cli download GEAR-Dreams/DreamZero-DROID-Data --repo-type dataset --local-dir ./data/droid_lerobot
-#     Or convert from scratch: see scripts/data/convert_droid.py
-#   - Wan2.1-I2V-14B-480P weights (auto-downloaded or pre-downloaded from HuggingFace)
-#     Download: huggingface-cli download Wan-AI/Wan2.1-I2V-14B-480P --local-dir ./checkpoints/Wan2.1-I2V-14B-480P
-#   - umt5-xxl tokenizer (auto-downloaded or pre-downloaded from HuggingFace)
-#     Download: huggingface-cli download google/umt5-xxl --local-dir ./checkpoints/umt5-xxl
+# Optional:
+#   TRAIN_ARCHITECTURE=lora_vfh   # default, LoRA + full VFH
+#   TRAIN_ARCHITECTURE=vfh_only   # only full VFH, everything else frozen
 
 export HYDRA_FULL_ERROR=1
 
@@ -19,11 +18,19 @@ export HYDRA_FULL_ERROR=1
 # Dataset path (DROID in LeRobot format)
 DROID_DATA_ROOT=${DROID_DATA_ROOT:-"./data/droid_lerobot"}
 
-# Output directory for training checkpoints
-OUTPUT_DIR=${OUTPUT_DIR:-"./checkpoints/dreamzero_droid_full_finetune"}
+# Path to old pretrained checkpoint (without VFH)
+PRETRAINED_MODEL_PATH=${PRETRAINED_MODEL_PATH:-"./checkpoints/DreamZero-DROID"}
 
-# Number of GPUs to use (8x H100 for ZeRO-2 + CPU offload full fine-tuning)
-NUM_GPUS=${NUM_GPUS:-8}
+# Output directory for training checkpoints
+OUTPUT_DIR=${OUTPUT_DIR:-"./checkpoints/dreamzero_droid_vfh_finetune"}
+
+# Number of GPUs to use
+NUM_GPUS=${NUM_GPUS:-1}
+
+# New training modes:
+#   lora_vfh: LoRA adapters + full value head (recommended)
+#   vfh_only: full value head only, rest frozen
+TRAIN_ARCHITECTURE=${TRAIN_ARCHITECTURE:-"lora_vfh"}
 
 # Model weight paths (download from HuggingFace if not already present)
 WAN_CKPT_DIR=${WAN_CKPT_DIR:-"./checkpoints/Wan2.1-I2V-14B-480P"}
@@ -49,11 +56,23 @@ if [ ! -d "$DROID_DATA_ROOT" ]; then
     exit 1
 fi
 
+# Validate pretrained checkpoint exists
+if [ ! -d "$PRETRAINED_MODEL_PATH" ]; then
+    echo "ERROR: pretrained checkpoint not found at $PRETRAINED_MODEL_PATH"
+    exit 1
+fi
+
+# Validate training architecture
+if [ "$TRAIN_ARCHITECTURE" != "lora_vfh" ] && [ "$TRAIN_ARCHITECTURE" != "vfh_only" ]; then
+    echo "ERROR: TRAIN_ARCHITECTURE must be 'lora_vfh' or 'vfh_only'"
+    exit 1
+fi
+
 torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment.py \
     report_to=wandb \
     data=dreamzero/droid_relative \
     wandb_project=dreamzero \
-    train_architecture=full \
+    train_architecture=$TRAIN_ARCHITECTURE \
     num_frames=33 \
     action_horizon=24 \
     num_views=3 \
@@ -64,8 +83,8 @@ torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment
     num_action_per_block=24 \
     num_state_per_block=1 \
     seed=42 \
-    training_args.learning_rate=1e-5 \
-    training_args.deepspeed="groot/vla/configs/deepspeed/zero2_offload.json" \
+    training_args.learning_rate=1e-4 \
+    training_args.deepspeed="groot/vla/configs/deepspeed/zero2.json" \
     save_steps=1000 \
     training_args.warmup_ratio=0.05 \
     output_dir=$OUTPUT_DIR \
@@ -81,13 +100,16 @@ torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment
     dataloader_num_workers=1 \
     image_resolution_width=320 \
     image_resolution_height=176 \
-    save_lora_only=false \
+    save_lora_only=true \
     max_chunk_size=4 \
     frame_seqlen=880 \
-    save_strategy=no \
+    save_strategy=steps \
     droid_data_root=$DROID_DATA_ROOT \
     dit_version=$WAN_CKPT_DIR \
     text_encoder_pretrained_path=$WAN_CKPT_DIR/models_t5_umt5-xxl-enc-bf16.pth \
     image_encoder_pretrained_path=$WAN_CKPT_DIR/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth \
     vae_pretrained_path=$WAN_CKPT_DIR/Wan2.1_VAE.pth \
-    tokenizer_path=$TOKENIZER_DIR
+    tokenizer_path=$TOKENIZER_DIR \
+    pretrained_model_path=$PRETRAINED_MODEL_PATH \
+    ++action_head_cfg.config.skip_component_loading=true \
+    ++action_head_cfg.config.defer_lora_injection=true

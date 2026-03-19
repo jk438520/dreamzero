@@ -21,6 +21,8 @@ from huggingface_hub import hf_hub_download
 logger = logging.getLogger(__name__)
 
 WAN_HF_REPO_ID = "Wan-AI/Wan2.1-I2V-14B-480P"
+LORA_TRAIN_ARCHITECTURES = {"lora", "lora_vfh"}
+VALID_TRAIN_ARCHITECTURES = {"full", "lora", "lora_vfh", "vfh_only"}
 
 
 def hf_download(filename: str) -> str:
@@ -77,7 +79,18 @@ class WANPolicyHeadConfig(PretrainedConfig):
     lora_alpha: int = field(default=4, metadata={"help": "LoRA alpha."})
     lora_target_modules: str = field(default="q,k,v,o,ffn.0,ffn.2")
     init_lora_weights: str = field(default="kaiming", metadata={"help": "LoRA initialization method."})
-    train_architecture: str= field(default="lora", metadata={"help": "Train architecture."})
+    train_architecture: str= field(
+        default="lora",
+        metadata={
+            "help": (
+                "Train architecture. Supported values: "
+                "'full' (full finetune), "
+                "'lora' (legacy LoRA + selected full modules), "
+                "'lora_vfh' (LoRA + fully train value head), "
+                "'vfh_only' (only value head trainable)."
+            )
+        },
+    )
     skip_component_loading: bool = field(default=False, metadata={"help": "Skip loading individual component weights (used when loading from full pretrained model)."})
 
     use_gradient_checkpointing: bool = field(default=True, metadata={"help": "Whether to use gradient checkpointing."})
@@ -323,6 +336,12 @@ class WANPolicyHead(ActionHead):
         self.set_trainable_parameters(config.tune_projector, config.tune_diffusion_model)
 
     def set_trainable_parameters(self, tune_projector: bool, tune_diffusion_model: bool):
+        if self.train_architecture not in VALID_TRAIN_ARCHITECTURES:
+            raise ValueError(
+                f"Unsupported train_architecture '{self.train_architecture}'. "
+                f"Supported values: {sorted(VALID_TRAIN_ARCHITECTURES)}"
+            )
+
         self.tune_projector = tune_projector
         self.tune_diffusion_model = tune_diffusion_model
         for p in self.parameters():
@@ -355,8 +374,27 @@ class WANPolicyHead(ActionHead):
             self.model.action_decoder.requires_grad_(True)
             self.model.value_encoder.requires_grad_(True)
             self.model.value_decoder.requires_grad_(True)
-        elif self.train_architecture == "lora" and self.defer_lora_injection:
+        elif self.train_architecture == "lora_vfh" and not self.defer_lora_injection:
+            print("Adding LoRA to model and fully training value head")
+            for p in self.parameters():
+                p.requires_grad = False
+            self.model = self.add_lora_to_model(
+                self.model,
+                lora_rank=self.lora_rank,
+                lora_alpha=self.lora_alpha,
+                lora_target_modules=self.lora_target_modules,
+                init_lora_weights=self.init_lora_weights,
+            )
+            self.model.value_encoder.requires_grad_(True)
+            self.model.value_decoder.requires_grad_(True)
+        elif self.train_architecture in LORA_TRAIN_ARCHITECTURES and self.defer_lora_injection:
             print("Deferring LoRA injection until after pretrained weights are loaded")
+        elif self.train_architecture == "vfh_only":
+            print("Training only value head (rest of model frozen)")
+            for p in self.parameters():
+                p.requires_grad = False
+            self.model.value_encoder.requires_grad_(True)
+            self.model.value_decoder.requires_grad_(True)
         else:
             self.print_trainable_params()
 
@@ -412,8 +450,26 @@ class WANPolicyHead(ActionHead):
             self.image_encoder.requires_grad_(False)
             self.vae.requires_grad_(False)
             self.print_trainable_params()
+        elif self.train_architecture == "lora_vfh":
+            print("Injecting LoRA after loading pretrained weights and fully training value head")
+            for p in self.parameters():
+                p.requires_grad = False
+            self.model = self.add_lora_to_model(
+                self.model,
+                lora_rank=self.lora_rank,
+                lora_alpha=self.lora_alpha,
+                lora_target_modules=self.lora_target_modules,
+                init_lora_weights=self.init_lora_weights,
+            )
+            self.model.value_encoder.requires_grad_(True)
+            self.model.value_decoder.requires_grad_(True)
+
+            self.text_encoder.requires_grad_(False)
+            self.image_encoder.requires_grad_(False)
+            self.vae.requires_grad_(False)
+            self.print_trainable_params()
         else:
-            print("LoRA injection not needed (train_architecture != 'lora')")
+            print("LoRA injection not needed (train_architecture not in LoRA modes)")
 
     def set_frozen_modules_to_eval_mode(self):
         """

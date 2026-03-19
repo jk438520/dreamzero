@@ -297,7 +297,7 @@ class GrootSimPolicy(BaseGrootSimPolicy):
 
         model.eval()
         model.requires_grad_(False)
-        if model.action_head.train_architecture == "lora":
+        if model.action_head.train_architecture in {"lora", "lora_vfh"}:
             print(f"Merging LoRA weights into main model weights")
             # Merge the LoRA weights into the main model weights, and delete the LoRA
             # weights to save memory. Note that the WanModel is in model.action_head.model.
