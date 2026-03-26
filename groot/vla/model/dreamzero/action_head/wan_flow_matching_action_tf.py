@@ -794,19 +794,21 @@ class WANPolicyHead(ActionHead):
         if actions.numel() > 0:
             num_value_per_block = getattr(self.config, 'num_value_per_block', 1)
             value_dim = getattr(self.config, 'value_dim', 1)
-            actions_per_block = self.model.num_action_per_block // self.num_frame_per_block
+            actions_per_block = self.model.num_action_per_block
             num_blocks = actions.shape[1] // actions_per_block
 
             # Use real task progress from the data pipeline (frame_index / episode_length)
             if hasattr(action_input, 'task_progress') and action_input.task_progress is not None:
                 # task_progress shape: [B, action_horizon, 1]
                 raw_progress = action_input.task_progress.to(device=self._device, dtype=actions.dtype)
-                # Subsample to per-block: take last action step of each block
-                block_end_indices = torch.arange(
-                    actions_per_block - 1, raw_progress.shape[1], actions_per_block,
-                    device=self._device
-                )[:num_blocks]
-                task_progress = raw_progress[:, block_end_indices, :value_dim]
+                if raw_progress.shape[1] == num_blocks:
+                    task_progress = raw_progress[:, :, :value_dim]
+                elif raw_progress.shape[1] == 1:
+                    task_progress = raw_progress[:, :, :value_dim].expand(-1, num_blocks, -1)
+                else:
+                    task_progress = torch.nn.functional.interpolate(
+                        raw_progress.transpose(1, 2), size=num_blocks, mode='linear', align_corners=True
+                    ).transpose(1, 2)[:, :, :value_dim]
             else:
                 # Fallback: synthetic linear ramp (for datasets without frame_index)
                 progress_per_block = torch.linspace(

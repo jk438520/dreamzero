@@ -25,7 +25,7 @@ PRETRAINED_MODEL_PATH=${PRETRAINED_MODEL_PATH:-"./checkpoints/DreamZero-DROID"}
 OUTPUT_DIR=${OUTPUT_DIR:-"./checkpoints/dreamzero_droid_vfh_finetune"}
 
 # Number of GPUs to use
-NUM_GPUS=${NUM_GPUS:-1}
+NUM_GPUS=${NUM_GPUS:-2}
 
 # New training modes:
 #   lora_vfh: LoRA adapters + full value head (recommended)
@@ -89,7 +89,7 @@ torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment
     training_args.warmup_ratio=0.05 \
     output_dir=$OUTPUT_DIR \
     per_device_train_batch_size=1 \
-    max_steps=10 \
+    max_steps=200 \
     weight_decay=1e-5 \
     save_total_limit=10 \
     upload_checkpoints=false \
