@@ -792,31 +792,22 @@ class WANPolicyHead(ActionHead):
 
         # ============ VALUE HEAD: compute ground truth and noise ============
         if actions.numel() > 0:
-            num_value_per_block = getattr(self.config, 'num_value_per_block', 1)
-            value_dim = getattr(self.config, 'value_dim', 1)
+            num_value_per_block = self.config.num_value_per_block
+            value_dim = self.config.value_dim
             actions_per_block = self.model.num_action_per_block
             num_blocks = actions.shape[1] // actions_per_block
 
             # Use real task progress from the data pipeline (frame_index / episode_length)
-            if hasattr(action_input, 'task_progress') and action_input.task_progress is not None:
-                # task_progress shape: [B, action_horizon, 1]
-                raw_progress = action_input.task_progress.to(device=self._device, dtype=actions.dtype)
-                if raw_progress.shape[1] == num_blocks:
-                    task_progress = raw_progress[:, :, :value_dim]
-                elif raw_progress.shape[1] == 1:
-                    task_progress = raw_progress[:, :, :value_dim].expand(-1, num_blocks, -1)
-                else:
-                    task_progress = torch.nn.functional.interpolate(
-                        raw_progress.transpose(1, 2), size=num_blocks, mode='linear', align_corners=True
-                    ).transpose(1, 2)[:, :, :value_dim]
+            # task_progress shape: [B, action_horizon, 1]
+            raw_progress = action_input.task_progress.to(device=self._device, dtype=actions.dtype)
+            if raw_progress.shape[1] == num_blocks:
+                task_progress = raw_progress[:, :, :value_dim]
+            elif raw_progress.shape[1] == 1:
+                task_progress = raw_progress[:, :, :value_dim].expand(-1, num_blocks, -1)
             else:
-                # Fallback: synthetic linear ramp (for datasets without frame_index)
-                progress_per_block = torch.linspace(
-                    1.0 / num_blocks, 1.0, num_blocks, device=self._device, dtype=actions.dtype
-                )
-                task_progress = progress_per_block.unsqueeze(0).unsqueeze(-1).expand(
-                    actions.shape[0], num_blocks, value_dim
-                )
+                task_progress = torch.nn.functional.interpolate(
+                    raw_progress.transpose(1, 2), size=num_blocks, mode='linear', align_corners=True
+                ).transpose(1, 2)[:, :, :value_dim]
 
             # Expand for num_value_per_block > 1
             if num_value_per_block > 1:
@@ -881,7 +872,7 @@ class WANPolicyHead(ActionHead):
 
             # Value head loss (flow matching on task progress)
             if actions.numel() > 0 and value_noise_pred is not None:
-                value_loss_coeff = getattr(self.config, 'value_loss_coeff', 1.0)
+                value_loss_coeff = self.config.value_loss_coeff
                 value_loss_per_sample = torch.nn.functional.mse_loss(
                     value_noise_pred.float(), training_target_value.float(), reduction='none'
                 )
