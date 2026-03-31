@@ -83,7 +83,4 @@ if __name__ == "__main__":
     source = args.source
     
     # 10 trajectories
-    create_subset(source, source + "_10_traj", 10)
-    
-    # 100 trajectories
-    create_subset(source, source + "_100_traj", 100)
+    create_subset(source, source + "_1_traj", 1)

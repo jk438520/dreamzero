@@ -1948,7 +1948,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         current_start_frame: int,
         value: torch.Tensor | None = None,
         timestep_value: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, list[torch.Tensor]]:
         r"""
         Forward pass through the diffusion model blocks.
         """
@@ -2025,8 +2025,16 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         if action is not None:
             action_noise_pred = x[:, seq_len: seq_len + action_length]
             action_noise_pred = self.action_decoder(action_noise_pred, embodiment_id)
+
+            # Extract value noise prediction
+            state_length = state_features.shape[1]
+            value_length = value_features.shape[1]
+            value_start = seq_len + action_length + state_length
+            value_noise_pred = x[:, value_start: value_start + value_length]
+            value_noise_pred = self.value_decoder(value_noise_pred)
         else:
             action_noise_pred = None
+            value_noise_pred = None
 
         # Build a tensor that contains only video tokens per sample with length = max(video_lens)
         x_video = x[:, :seq_len]
@@ -2035,7 +2043,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         # Unpatchify video-only tokens
         x_video = self.head(x_video, e_video.unsqueeze(2))
 
-        return x_video, action_noise_pred, updated_kv_caches
+        return x_video, action_noise_pred, value_noise_pred, updated_kv_caches
 
 
     def _forward_inference_trt(
@@ -2061,7 +2069,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         for block_index in range(len(self.blocks)):
             kv_cache_list.append(kv_cache_packed[block_index])
         
-        x_video, action_noise_pred, _ = self._forward_inference(
+        x_video, action_noise_pred, value_noise_pred, _ = self._forward_inference(
             x=x,
             timestep=timestep,
             context=context,
@@ -2101,7 +2109,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         for block_index in range(len(self.blocks)):
             kv_cache_list.append(kv_cache_packed[block_index])
         
-        x_video, action_noise_pred, _ = self._forward_inference(
+        x_video, action_noise_pred, value_noise_pred, _ = self._forward_inference(
             x=x,
             timestep=timestep,
             context=context,
@@ -2134,7 +2142,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         timestep_action=None,
         state=None,
         embodiment_id=None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor]]:
+        value=None,
+        timestep_value=None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, list[torch.Tensor]]:
         r"""
         Run the diffusion model with kv caching.
         See Algorithm 2 of CausVid paper https://arxiv.org/abs/2412.07772 for details.
@@ -2162,6 +2172,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 CLIP image features for image-to-video mode
             timestep_action (Tensor, *optional*):
                 Action timestep tensor of shape [B]
+            value (Tensor, *optional*):
+                Noisy value tensor of shape [B, V_len, V_dim]
+            timestep_value (Tensor, *optional*):
+                Value timestep tensor of shape [B, V_len]
         Returns:
             List[Tensor]:
                 List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
@@ -2182,7 +2196,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             start_frame=current_start_frame,
         )
 
-        x_video, action_noise_pred, updated_kv_caches = self._forward_blocks(
+        x_video, action_noise_pred, value_noise_pred, updated_kv_caches = self._forward_blocks(
             x=x,
             seq_len=seq_len,
             freqs=freqs,
@@ -2195,18 +2209,22 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             state=state,
             kv_cache=kv_cache,
             current_start_frame=current_start_frame,
+            value=value,
+            timestep_value=timestep_value,
         )
 
         # Copy the updated KV caches back to the original KV cache.
         x_video = x_video.clone()
         if action_noise_pred is not None:
             action_noise_pred = action_noise_pred.clone()
+        if value_noise_pred is not None:
+            value_noise_pred = value_noise_pred.clone()
         #for block_index, updated_kv_cache in enumerate(updated_kv_caches):
         #    kv_cache[block_index] = updated_kv_cache.clone()
 
         video_noise_pred = self.unpatchify(x_video, grid_size)
 
-        return video_noise_pred, action_noise_pred, updated_kv_caches
+        return video_noise_pred, action_noise_pred, value_noise_pred, updated_kv_caches
 
     def _forward_train(
         self,
