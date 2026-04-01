@@ -628,6 +628,7 @@ class GrootSimPolicy(BaseGrootSimPolicy):
             model_pred = self.trained_model.joint_video_action(normalized_input)
         normalized_action = model_pred["action_pred"].float()
         video_pred = model_pred["video_pred"]
+        value_pred = model_pred.get("value_pred")
 
         # 4. Unnormalize actions (pass obs for relative action conversion)
         original_obs = batch.obs
@@ -636,6 +637,11 @@ class GrootSimPolicy(BaseGrootSimPolicy):
         # 5. Remove batch dimension if we added it
         if not is_batched:
             batch.act = squeeze_dict_values(batch.act)
+            if value_pred is not None:
+                value_pred = value_pred.squeeze(0)
+
+        if value_pred is not None:
+            batch.value_pred = value_pred.float()
         return batch, video_pred
 
     def lazy_joint_forward_causal(self, batch, video=None, latent_video=None, state=None, video_only=False, **kwargs):
@@ -680,6 +686,7 @@ class GrootSimPolicy(BaseGrootSimPolicy):
             model_pred = self.trained_model.lazy_joint_video_action_causal(normalized_input, latent_video=latent_video)
         normalized_action = model_pred["action_pred"].float()
         video_pred = model_pred["video_pred"]
+        value_pred = model_pred.get("value_pred")
 
         model_time = time.perf_counter() - model_start_time
 
@@ -694,6 +701,11 @@ class GrootSimPolicy(BaseGrootSimPolicy):
         # 5. Remove batch dimension if we added it
         if not is_batched:
             batch.act = squeeze_dict_values(batch.act)
+            if value_pred is not None:
+                value_pred = value_pred.squeeze(0)
+
+        if value_pred is not None:
+            batch.value_pred = value_pred.float()
 
         untransform_time = time.perf_counter() - untransform_start_time
         total_time = transform_time + model_time + untransform_time
@@ -736,6 +748,7 @@ class GrootSimPolicy(BaseGrootSimPolicy):
             model_pred = self.trained_model.lazy_joint_video_action_causal_gt_cond(normalized_input, latent_video=latent_video)
         normalized_action = model_pred["action_pred"].float()
         video_pred = model_pred["video_pred"]
+        value_pred = model_pred.get("value_pred")
 
         # 4. Unnormalize actions (pass obs for relative action conversion)
         original_obs = batch.obs
@@ -744,6 +757,11 @@ class GrootSimPolicy(BaseGrootSimPolicy):
         # 5. Remove batch dimension if we added it
         if not is_batched:
             batch.act = squeeze_dict_values(batch.act)
+            if value_pred is not None:
+                value_pred = value_pred.squeeze(0)
+
+        if value_pred is not None:
+            batch.value_pred = value_pred.float()
         return batch, video_pred
 
     def lazy_joint_forward(self, batch, video=None, state=None, **kwargs):
@@ -776,6 +794,7 @@ class GrootSimPolicy(BaseGrootSimPolicy):
             model_pred = self.trained_model.lazy_joint_video_action(normalized_input)
         normalized_action = model_pred["action_pred"].float()
         video_pred = model_pred["video_pred"]
+        value_pred = model_pred.get("value_pred")
 
         # 4. Unnormalize actions (pass obs for relative action conversion)
         original_obs = batch.obs
@@ -784,6 +803,11 @@ class GrootSimPolicy(BaseGrootSimPolicy):
         # 5. Remove batch dimension if we added it
         if not is_batched:
             batch.act = squeeze_dict_values(batch.act)
+            if value_pred is not None:
+                value_pred = value_pred.squeeze(0)
+
+        if value_pred is not None:
+            batch.value_pred = value_pred.float()
         return batch, video_pred
     
     def lazy_joint_forward_efficient(self, batch, video=None, state=None, prompt_embs=None, prompt_emb_nega=None, **kwargs):
