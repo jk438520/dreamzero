@@ -1328,6 +1328,22 @@ class LeRobotSingleDataset(Dataset):
                     data[key] = self.get_data_by_modality(
                         trajectory_id, modality, key, indices[key]
                     )
+
+        # Compute per-action-step task progress (frame_index / episode_length)
+        action_indices_key = next((k for k in indices if k.startswith("action.")), None)
+        if action_indices_key is not None and "frame_index" in self.curr_traj_data.columns:
+            trajectory_index = self.get_trajectory_index(trajectory_id)
+            max_length = self.trajectory_lengths[trajectory_index]
+            step_indices = indices[action_indices_key]
+            frame_index_array = self.curr_traj_data["frame_index"].to_numpy()
+            frame_index = self.retrieve_data_and_pad(
+                array=frame_index_array,
+                step_indices=step_indices,
+                max_length=max_length,
+                padding_strategy="first_last",
+            )
+            data["_task_progress"] = (frame_index / max_length).reshape(-1, 1).astype(np.float32)
+
         return data
 
     def get_parquet_path(self, trajectory_id: int) -> Path:

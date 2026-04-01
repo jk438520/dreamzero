@@ -525,6 +525,23 @@ class DreamTransform(InvertibleModalityTransform):
             transformed_data["action"] = actions
             transformed_data["action_mask"] = actions_mask
 
+            # Task progress for value head: per-action-step progress in the rollout
+            if "_task_progress" in data:
+                task_progress = data["_task_progress"].astype(np.float32)
+                # Pad to action_horizon if needed (e.g. when action is shorter)
+                if task_progress.shape[0] < self.action_horizon:
+                    task_progress = np.pad(
+                        task_progress,
+                        ((0, self.action_horizon - task_progress.shape[0]), (0, 0)),
+                        mode="edge",
+                    )
+                transformed_data["task_progress"] = task_progress
+            else:
+                # Fallback: synthetic linear ramp (only if dataset doesn't provide frame_index)
+                transformed_data["task_progress"] = np.linspace(
+                    0.0, 1.0, self.action_horizon, dtype=np.float32
+                ).reshape(-1, 1)
+
             # default for lapa instance
             transformed_data["lapa_action"] = np.zeros_like(transformed_data["action"])
             transformed_data["lapa_action_mask"] = np.zeros_like(transformed_data["action_mask"])

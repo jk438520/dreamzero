@@ -50,7 +50,7 @@ if [ ! -d "$DROID_DATA_ROOT" ]; then
 fi
 
 torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment.py \
-    report_to=none \
+    report_to=wandb \
     data=dreamzero/droid_relative \
     wandb_project=dreamzero \
     train_architecture=full \
@@ -70,7 +70,7 @@ torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment
     training_args.warmup_ratio=0.05 \
     output_dir=$OUTPUT_DIR \
     per_device_train_batch_size=1 \
-    max_steps=100 \
+    max_steps=10 \
     weight_decay=1e-5 \
     save_total_limit=10 \
     upload_checkpoints=false \

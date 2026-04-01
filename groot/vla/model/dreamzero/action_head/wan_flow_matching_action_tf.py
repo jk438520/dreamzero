@@ -21,6 +21,8 @@ from huggingface_hub import hf_hub_download
 logger = logging.getLogger(__name__)
 
 WAN_HF_REPO_ID = "Wan-AI/Wan2.1-I2V-14B-480P"
+LORA_TRAIN_ARCHITECTURES = {"lora", "lora_vfh"}
+VALID_TRAIN_ARCHITECTURES = {"full", "lora", "lora_vfh", "vfh_only"}
 
 
 def hf_download(filename: str) -> str:
@@ -77,7 +79,18 @@ class WANPolicyHeadConfig(PretrainedConfig):
     lora_alpha: int = field(default=4, metadata={"help": "LoRA alpha."})
     lora_target_modules: str = field(default="q,k,v,o,ffn.0,ffn.2")
     init_lora_weights: str = field(default="kaiming", metadata={"help": "LoRA initialization method."})
-    train_architecture: str= field(default="lora", metadata={"help": "Train architecture."})
+    train_architecture: str= field(
+        default="lora",
+        metadata={
+            "help": (
+                "Train architecture. Supported values: "
+                "'full' (full finetune), "
+                "'lora' (legacy LoRA + selected full modules), "
+                "'lora_vfh' (LoRA + fully train value head), "
+                "'vfh_only' (only value head trainable)."
+            )
+        },
+    )
     skip_component_loading: bool = field(default=False, metadata={"help": "Skip loading individual component weights (used when loading from full pretrained model)."})
 
     use_gradient_checkpointing: bool = field(default=True, metadata={"help": "Whether to use gradient checkpointing."})
@@ -142,6 +155,17 @@ class WANPolicyHeadConfig(PretrainedConfig):
     text_encoder_cfg: dict = field(default=None)
     image_encoder_cfg: dict = field(default=None)
     vae_cfg: dict = field(default=None)
+
+    # Value head (auxiliary task progress prediction via flow matching)
+    value_loss_coeff: float = field(
+        default=1.0, metadata={"help": "Loss coefficient for value head."}
+    )
+    num_value_per_block: int = field(
+        default=1, metadata={"help": "Number of value tokens per block."}
+    )
+    value_dim: int = field(
+        default=1, metadata={"help": "Dimension of value prediction (1 for scalar task progress)."}
+    )
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -312,6 +336,12 @@ class WANPolicyHead(ActionHead):
         self.set_trainable_parameters(config.tune_projector, config.tune_diffusion_model)
 
     def set_trainable_parameters(self, tune_projector: bool, tune_diffusion_model: bool):
+        if self.train_architecture not in VALID_TRAIN_ARCHITECTURES:
+            raise ValueError(
+                f"Unsupported train_architecture '{self.train_architecture}'. "
+                f"Supported values: {sorted(VALID_TRAIN_ARCHITECTURES)}"
+            )
+
         self.tune_projector = tune_projector
         self.tune_diffusion_model = tune_diffusion_model
         for p in self.parameters():
@@ -342,8 +372,29 @@ class WANPolicyHead(ActionHead):
             self.model.state_encoder.requires_grad_(True)
             self.model.action_encoder.requires_grad_(True)
             self.model.action_decoder.requires_grad_(True)
-        elif self.train_architecture == "lora" and self.defer_lora_injection:
+            self.model.value_encoder.requires_grad_(True)
+            self.model.value_decoder.requires_grad_(True)
+        elif self.train_architecture == "lora_vfh" and not self.defer_lora_injection:
+            print("Adding LoRA to model and fully training value head")
+            for p in self.parameters():
+                p.requires_grad = False
+            self.model = self.add_lora_to_model(
+                self.model,
+                lora_rank=self.lora_rank,
+                lora_alpha=self.lora_alpha,
+                lora_target_modules=self.lora_target_modules,
+                init_lora_weights=self.init_lora_weights,
+            )
+            self.model.value_encoder.requires_grad_(True)
+            self.model.value_decoder.requires_grad_(True)
+        elif self.train_architecture in LORA_TRAIN_ARCHITECTURES and self.defer_lora_injection:
             print("Deferring LoRA injection until after pretrained weights are loaded")
+        elif self.train_architecture == "vfh_only":
+            print("Training only value head (rest of model frozen)")
+            for p in self.parameters():
+                p.requires_grad = False
+            self.model.value_encoder.requires_grad_(True)
+            self.model.value_decoder.requires_grad_(True)
         else:
             self.print_trainable_params()
 
@@ -390,6 +441,8 @@ class WANPolicyHead(ActionHead):
             self.model.state_encoder.requires_grad_(True)
             self.model.action_encoder.requires_grad_(True)
             self.model.action_decoder.requires_grad_(True)
+            self.model.value_encoder.requires_grad_(True)
+            self.model.value_decoder.requires_grad_(True)
             # self.model.registers.requires_grad_(True)
             # self.model.time_modality_projection.requires_grad_(True)
             
@@ -397,8 +450,26 @@ class WANPolicyHead(ActionHead):
             self.image_encoder.requires_grad_(False)
             self.vae.requires_grad_(False)
             self.print_trainable_params()
+        elif self.train_architecture == "lora_vfh":
+            print("Injecting LoRA after loading pretrained weights and fully training value head")
+            for p in self.parameters():
+                p.requires_grad = False
+            self.model = self.add_lora_to_model(
+                self.model,
+                lora_rank=self.lora_rank,
+                lora_alpha=self.lora_alpha,
+                lora_target_modules=self.lora_target_modules,
+                init_lora_weights=self.init_lora_weights,
+            )
+            self.model.value_encoder.requires_grad_(True)
+            self.model.value_decoder.requires_grad_(True)
+
+            self.text_encoder.requires_grad_(False)
+            self.image_encoder.requires_grad_(False)
+            self.vae.requires_grad_(False)
+            self.print_trainable_params()
         else:
-            print("LoRA injection not needed (train_architecture != 'lora')")
+            print("LoRA injection not needed (train_architecture not in LoRA modes)")
 
     def set_frozen_modules_to_eval_mode(self):
         """
@@ -583,6 +654,13 @@ class WANPolicyHead(ActionHead):
             param.data = param.to(torch.float32)
         return model
 
+    def reset(self):
+        """Reset the autoregressive state for a new episode or sequence."""
+        self.current_start_frame = 0
+        self.kv_cache1 = None
+        self.kv_cache_neg = None
+        self.ys = None
+
     def forward(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
         # Set frozen modules to eval
         self.set_frozen_modules_to_eval_mode()
@@ -719,17 +797,58 @@ class WANPolicyHead(ActionHead):
             noisy_actions = None
             training_target_action = None
 
+        # ============ VALUE HEAD: compute ground truth and noise ============
+        if actions.numel() > 0:
+            num_value_per_block = self.config.num_value_per_block
+            value_dim = self.config.value_dim
+            actions_per_block = self.model.num_action_per_block
+            num_blocks = actions.shape[1] // actions_per_block
+
+            # Use real task progress from the data pipeline (frame_index / episode_length)
+            # task_progress shape: [B, action_horizon, 1]
+            raw_progress = action_input.task_progress.to(device=self._device, dtype=actions.dtype)
+            if raw_progress.shape[1] == num_blocks:
+                task_progress = raw_progress[:, :, :value_dim]
+            elif raw_progress.shape[1] == 1:
+                task_progress = raw_progress[:, :, :value_dim].expand(-1, num_blocks, -1)
+            else:
+                task_progress = torch.nn.functional.interpolate(
+                    raw_progress.transpose(1, 2), size=num_blocks, mode='linear', align_corners=True
+                ).transpose(1, 2)[:, :, :value_dim]
+
+            # Expand for num_value_per_block > 1
+            if num_value_per_block > 1:
+                task_progress = task_progress.repeat_interleave(num_value_per_block, dim=1)
+
+            noise_value = torch.randn_like(task_progress)
+            timestep_value_id = torch.randint(
+                0, self.scheduler.num_train_timesteps,
+                (task_progress.shape[0], task_progress.shape[1])
+            )
+            timestep_value = self.scheduler.timesteps[timestep_value_id].to(self._device)
+            noisy_value = self.scheduler.add_noise(
+                task_progress.flatten(0, 1),
+                noise_value.flatten(0, 1),
+                timestep_value.flatten(0, 1),
+            ).unflatten(0, (task_progress.shape[0], task_progress.shape[1]))
+            training_target_value = self.scheduler.training_target(task_progress, noise_value, timestep_value)
+        else:
+            noisy_value = None
+            timestep_value = None
+            training_target_value = None
+
         # Compute loss
         with torch.amp.autocast(dtype=torch.bfloat16, device_type=torch.device(self._device).type):
             if actions.numel() > 0:
-                video_noise_pred, action_noise_pred = self.model(
+                video_noise_pred, action_noise_pred, value_noise_pred = self.model(
                     noisy_latents.transpose(1, 2), timestep=timestep, clip_feature=clip_feas, y=ys, context=prompt_embs, seq_len=seq_len,
                     state=state_features, embodiment_id=embodiment_id,
                     action=noisy_actions, timestep_action=timestep_action, 
                     clean_x=latents.transpose(1, 2),
+                    value=noisy_value, timestep_value=timestep_value,
                 )
             else:
-                video_noise_pred, action_noise_pred = self.model(
+                video_noise_pred, action_noise_pred, value_noise_pred = self.model(
                     noisy_latents.transpose(1, 2), timestep=timestep, timestep_action=timestep_action, 
                     clip_feature=clip_feas, y=ys, context=prompt_embs, seq_len=seq_len,
                     state=state_features, embodiment_id=embodiment_id,
@@ -757,6 +876,20 @@ class WANPolicyHead(ActionHead):
             else:
                 weighted_action_loss = torch.tensor(0.0, device=self._device)
                 loss = weighted_dynamics_loss
+
+            # Value head loss (flow matching on task progress)
+            if actions.numel() > 0 and value_noise_pred is not None:
+                value_loss_coeff = self.config.value_loss_coeff
+                value_loss_per_sample = torch.nn.functional.mse_loss(
+                    value_noise_pred.float(), training_target_value.float(), reduction='none'
+                )
+                weight_value = value_loss_per_sample.mean(dim=2) * self.scheduler.training_weight(
+                    timestep_value.flatten(0, 1),
+                ).unflatten(0, (task_progress.shape[0], task_progress.shape[1])).to(self._device)
+                weighted_value_loss = weight_value.mean() * value_loss_coeff
+                loss = loss + weighted_value_loss
+            else:
+                weighted_value_loss = torch.tensor(0.0, device=self._device)
             # loss = dynamics_loss_per_sample.mean()
 
         # Record log
@@ -764,6 +897,7 @@ class WANPolicyHead(ActionHead):
             "loss": loss,
             "dynamics_loss": weighted_dynamics_loss,
             "action_loss": weighted_action_loss,
+            "value_loss": weighted_value_loss,
         }
 
         return BatchFeature(data=output_dict)
@@ -820,7 +954,9 @@ class WANPolicyHead(ActionHead):
         kv_caches: list[KVCacheType],
         crossattn_caches: list[KVCacheType],
         kv_cache_metadata: dict[str, bool | int],
-    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        value: torch.Tensor | None = None,
+        timestep_value: torch.Tensor | None = None,
+    ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         predictions = []
         for index, prompt_emb in enumerate(context):
             kv_cache = kv_caches[index]
@@ -838,7 +974,7 @@ class WANPolicyHead(ActionHead):
                     kv_cache=kv_cache,
                 )
             else:
-                obs_noise_pred, action_noise_pred, updated_kv_caches = self.model(
+                obs_noise_pred, action_noise_pred, value_noise_pred, updated_kv_caches = self.model(
                     noisy_input,
                     timestep,
                     action=action,
@@ -852,6 +988,8 @@ class WANPolicyHead(ActionHead):
                     kv_cache=kv_cache,
                     crossattn_cache=crossattn_cache,
                     current_start_frame=kv_cache_metadata["start_frame"],
+                    value=value,
+                    timestep_value=timestep_value,
                 )
                 if kv_cache_metadata["update_kv_cache"]:
                     for block_index, updated_kv_cache in enumerate(updated_kv_caches):
@@ -861,13 +999,19 @@ class WANPolicyHead(ActionHead):
                 action_noise_pred = action_noise_pred.clone()
             else:
                 action_noise_pred = torch.tensor(0.0, device=obs_noise_pred.device) # dummy action noise prediction
-            predictions.append((obs_noise_pred, action_noise_pred))
+            
+            if value_noise_pred is not None:
+                value_noise_pred = value_noise_pred.clone()
+            else:
+                value_noise_pred = torch.tensor(0.0, device=obs_noise_pred.device) # dummy value noise prediction
+
+            predictions.append((obs_noise_pred, action_noise_pred, value_noise_pred))
         return self._exchange_predictions(predictions)
 
     def _exchange_predictions(
         self,
-        predictions: list[tuple[torch.Tensor, torch.Tensor]],
-    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        predictions: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         if self.ip_size == 1:
             return predictions
 
@@ -890,11 +1034,11 @@ class WANPolicyHead(ActionHead):
         for req in reqs:
             req.wait()
 
-        output_predictions: list[tuple[torch.Tensor, torch.Tensor] | None] = [None for _ in range(self.ip_size)]
+        output_predictions: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None] = [None for _ in range(self.ip_size)]
         output_predictions[self.ip_rank] = tuple(my_predictions)
         output_predictions[(self.ip_rank + 1) % self.ip_size] = tuple(other_predictions)
         assert all(isinstance(pred, tuple) for pred in output_predictions)
-        return cast(list[tuple[torch.Tensor, torch.Tensor]], output_predictions)
+        return cast(list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]], output_predictions)
     
     def should_run_model(self, index, current_timestep, prev_predictions):
 
@@ -1038,8 +1182,13 @@ class WANPolicyHead(ActionHead):
 
         end_vae_event.record()
 
-        noise_obs = self.generate_noise((image.shape[0], 16, self.num_frame_per_block, height//8, width//8), seed=self.seed, device='cuda', dtype=torch.bfloat16)
-        noise_action = self.generate_noise((image.shape[0], self.action_horizon, self.model.action_dim), seed=self.seed, device='cuda', dtype=torch.bfloat16)
+        noise_obs = self.generate_noise((image.shape[0], 16, self.num_frame_per_block, height//8, width//8), seed=self.seed, device=self._device, dtype=torch.bfloat16)
+        noise_action = self.generate_noise((image.shape[0], self.action_horizon, self.model.action_dim), seed=self.seed, device=self._device, dtype=torch.bfloat16)
+        
+        num_blocks = self.action_horizon // self.model.num_action_per_block
+        value_len = num_blocks * self.config.num_value_per_block
+        noise_value = self.generate_noise((image.shape[0], value_len, self.config.value_dim), seed=self.seed, device=self._device, dtype=torch.bfloat16)
+
         batch_size, num_channels, num_frames, height, width = noise_obs.shape
         ######### Generate video #########
         frame_seqlen = int(height * width / 4)
@@ -1128,6 +1277,7 @@ class WANPolicyHead(ActionHead):
 
         noisy_input = noise_obs
         noisy_input_action = noise_action
+        noisy_input_value = noise_value
 
         # Step 3.1: Spatial denoising loop
 
@@ -1139,9 +1289,15 @@ class WANPolicyHead(ActionHead):
             num_train_timesteps=self.scheduler.num_train_timesteps,
             shift=1,
             use_dynamic_shifting=False)
+        sample_scheduler_value = FlowUniPCMultistepScheduler(
+            num_train_timesteps=self.scheduler.num_train_timesteps,
+            shift=1,
+            use_dynamic_shifting=False)
         sample_scheduler.set_timesteps(
             self.num_inference_steps, device=noise_obs.device, shift=self.sigma_shift)
         sample_scheduler_action.set_timesteps(
+            self.num_inference_steps, device=noise_obs.device, shift=self.sigma_shift)
+        sample_scheduler_value.set_timesteps(
             self.num_inference_steps, device=noise_obs.device, shift=self.sigma_shift)
 
         # Decoupled inference: video sigmas end at video_final_noise instead of 0
@@ -1180,6 +1336,12 @@ class WANPolicyHead(ActionHead):
                 dtype=torch.int64,
             ) * action_timestep
 
+            timestep_value = torch.ones(
+                [batch_size, value_len],
+                device=noise_obs.device,
+                dtype=torch.int64,
+            ) * sample_scheduler_value.timesteps[index]
+
             # check if we need to run the DIT step
             should_run_model = self.should_run_model(index, current_timestep, prev_predictions)
             if should_run_model:
@@ -1205,19 +1367,22 @@ class WANPolicyHead(ActionHead):
                         start_frame=self.current_start_frame,
                         update_kv_cache=False,
                     ),
+                    value=noisy_input_value,
+                    timestep_value=timestep_value,
                 )
-                flow_pred_cond, flow_pred_cond_action = predictions[0]
-                flow_pred_uncond, flow_pred_uncond_action = predictions[1]
+                flow_pred_cond, flow_pred_cond_action, flow_pred_cond_value = predictions[0]
+                flow_pred_uncond, flow_pred_uncond_action, flow_pred_uncond_value = predictions[1]
 
                 flow_pred = flow_pred_uncond + self.cfg_scale * (flow_pred_cond - flow_pred_uncond)
-                prev_predictions.append((current_timestep, flow_pred, flow_pred_cond_action))
+                flow_pred_value = flow_pred_uncond_value + self.cfg_scale * (flow_pred_cond_value - flow_pred_uncond_value)
+                prev_predictions.append((current_timestep, flow_pred, flow_pred_cond_action, flow_pred_value))
                 max_cache_size = 2
                 if len(prev_predictions) > max_cache_size:
                     prev_predictions.pop(0)
 
             else:
                 assert len(prev_predictions) > 0, "prev_predictions must be set when skipping"
-                _, flow_pred, flow_pred_cond_action = prev_predictions[-1]
+                _, flow_pred, flow_pred_cond_action, flow_pred_value = prev_predictions[-1]
 
             end_diffusion_events[index].record()
 
@@ -1239,8 +1404,18 @@ class WANPolicyHead(ActionHead):
                 return_dict=False,
             )[0]
 
+            # Value: fully denoises with standard schedule
+            noisy_input_value = sample_scheduler_value.step(
+                model_output=flow_pred_value,
+                timestep=action_timestep,
+                sample=noisy_input_value,
+                step_index=index,
+                return_dict=False,
+            )[0]
+
         latents = noisy_input
         latents_action = noisy_input_action
+        latents_value = noisy_input_value
         output = latents
 
         if self.current_start_frame == 1:
@@ -1270,7 +1445,7 @@ class WANPolicyHead(ActionHead):
                   f"DIT Compute Steps {dit_compute_steps} steps, "
                   f"Scheduler {scheduler_time:.2f} seconds")
 
-        return BatchFeature(data={"action_pred": latents_action, "video_pred": output.transpose(1, 2)})
+        return BatchFeature(data={"action_pred": latents_action, "video_pred": output.transpose(1, 2), "value_pred": latents_value})
     
     def cache_predict_order1(self, current_timestep, timestep_1, f1, timestep_2, f2):
         h_curr = current_timestep - timestep_1

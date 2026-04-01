@@ -88,12 +88,12 @@ def rope_apply_no_polar(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
     x_rotated = torch.cat((rotated_x0, rotated_x1), dim=-1)
     return x_rotated
 
-
-def rope_action_apply(x, freqs, freqs_action, freqs_state, action_register_length, num_action_per_block=32, num_state_per_block=1):
+# TODO: fix the naming so that instead of "action_register_length", it's "total_register_length", and instead of "num_action_per_block", it's "num_action_register_per_block", etc. to avoid confusion with the actual action tokens in the input.
+def rope_action_apply(x, freqs, freqs_action, freqs_state, action_register_length, num_action_per_block, num_state_per_block, freqs_value, num_value_per_block):
     if ENABLE_TENSORRT:
-        return rope_action_apply_no_polar(x, freqs, freqs_action, freqs_state, action_register_length, num_action_per_block, num_state_per_block)
+        return rope_action_apply_no_polar(x, freqs, freqs_action, freqs_state, action_register_length, num_action_per_block, num_state_per_block, freqs_value, num_value_per_block)
     else:
-        return rope_action_apply_polar(x, freqs, freqs_action, freqs_state, action_register_length, num_action_per_block, num_state_per_block)
+        return rope_action_apply_polar(x, freqs, freqs_action, freqs_state, action_register_length, num_action_per_block, num_state_per_block, freqs_value, num_value_per_block)
 
 
 def rope_action_apply_no_polar(
@@ -102,16 +102,20 @@ def rope_action_apply_no_polar(
     freqs_action: torch.Tensor,
     freqs_state: torch.Tensor,
     action_register_length: int,
-    num_action_per_block: int = 32,
-    num_state_per_block: int = 1,
+    num_action_per_block: int,
+    num_state_per_block: int,
+    freqs_value: torch.Tensor,
+    num_value_per_block: int,
 ) -> torch.Tensor:
     B, seq_len, n, D = x.shape
 
     if action_register_length is not None:
-        chunk_size = action_register_length // (num_action_per_block + num_state_per_block)
+        tokens_per_block = num_action_per_block + num_state_per_block + num_value_per_block
+        chunk_size = action_register_length // tokens_per_block
         freqs_1d_action = freqs_action[:chunk_size * num_action_per_block]
         freqs_1d_state = freqs_state[:chunk_size * num_state_per_block]
-        freqs = torch.cat([freqs, freqs_1d_action, freqs_1d_state], dim=0)
+        freqs_1d_value = freqs_value[:chunk_size * num_value_per_block]
+        freqs = torch.cat([freqs, freqs_1d_action, freqs_1d_state, freqs_1d_value], dim=0)
 
     # Reshape freqs to be broadcastable: (1, seq_len, 1, D)
     freqs = freqs.unsqueeze(0).unsqueeze(2)
@@ -133,8 +137,10 @@ def rope_action_apply_polar(
     freqs_action: torch.Tensor,
     freqs_state: torch.Tensor,
     action_register_length: int | None,
-    num_action_per_block: int | None = None,
-    num_state_per_block: int | None = None,
+    num_action_per_block: int,
+    num_state_per_block: int,
+    freqs_value: torch.Tensor,
+    num_value_per_block: int,
 ) -> torch.Tensor:
     B, seq_len, n, _ = x.shape
 
@@ -147,11 +153,13 @@ def rope_action_apply_polar(
         assert num_action_per_block is not None
         assert num_state_per_block is not None
 
-        chunk_size = action_register_length // (num_action_per_block + num_state_per_block)
+        tokens_per_block = num_action_per_block + num_state_per_block + num_value_per_block
+        chunk_size = action_register_length // tokens_per_block
 
         freqs_1d_action = freqs_action[:chunk_size * num_action_per_block].view(chunk_size * num_action_per_block, 1, -1)
         freqs_1d_state = freqs_state[:chunk_size * num_state_per_block].view(chunk_size * num_state_per_block, 1, -1)
-        freqs = torch.cat([freqs, freqs_1d_action, freqs_1d_state], dim=0)
+        freqs_1d_value = freqs_value[:chunk_size * num_value_per_block].view(chunk_size * num_value_per_block, 1, -1)
+        freqs = torch.cat([freqs, freqs_1d_action, freqs_1d_state, freqs_1d_value], dim=0)
 
     # apply rotary embedding
     freqs = freqs.unsqueeze(0)
