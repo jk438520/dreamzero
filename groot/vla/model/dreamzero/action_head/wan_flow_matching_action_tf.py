@@ -99,6 +99,8 @@ class WANPolicyHeadConfig(PretrainedConfig):
     max_seq_len: int = field(default=1024, metadata={"help": "Maxium Sequence Length"})
     action_dim: int = field(default=None, metadata={"help": "Action dimension."})
     action_horizon: int = field(default=None, metadata={"help": "Action horizon."})
+    value_function_dim: int = field(default=1, metadata={"help": "Dimension of value function prediction (e.g., 1 for scalar task progress)."})
+    value_function_horizon: int = field(default=None, metadata={"help": "Value function horizon used during inference/training."})
     noise_beta_alpha: float = field(default=1.5, metadata={"help": ""})
     noise_beta_beta: float = field(default=1.0, metadata={"help": ""})
     noise_s: float = field(
@@ -256,6 +258,8 @@ class WANPolicyHead(ActionHead):
         self.model = instantiate(config.diffusion_model_cfg)
         self.action_dim = config.action_dim
         self.action_horizon = config.action_horizon
+        self.value_function_dim = config.value_function_dim
+        self.value_function_horizon = config.value_function_horizon
         self.num_inference_timesteps = config.num_inference_timesteps
         
         text_enc_path = ensure_file(
@@ -922,6 +926,8 @@ class WANPolicyHead(ActionHead):
         timestep: torch.Tensor,
         action: torch.Tensor | None,
         timestep_action: torch.Tensor | None,
+        value_function: torch.Tensor | None,
+        timestep_value_function: torch.Tensor | None,
         state: torch.Tensor | None,
         embodiment_id: torch.Tensor | None,
         context: list[torch.Tensor],
@@ -942,6 +948,8 @@ class WANPolicyHead(ActionHead):
                     timestep,
                     action=action,
                     timestep_action=timestep_action,
+                    value_function=value_function,
+                    timestep_value_function=timestep_value_function,
                     state=state,
                     context=prompt_emb,
                     y=y,
@@ -954,6 +962,8 @@ class WANPolicyHead(ActionHead):
                     timestep,
                     action=action,
                     timestep_action=timestep_action,
+                    value_function=value_function,
+                    timestep_value_function=timestep_value_function,
                     state=state,
                     embodiment_id=embodiment_id,
                     context=prompt_emb,
@@ -1155,6 +1165,7 @@ class WANPolicyHead(ActionHead):
 
         noise_obs = self.generate_noise((image.shape[0], 16, self.num_frame_per_block, height//8, width//8), seed=self.seed, device='cuda', dtype=torch.bfloat16)
         noise_action = self.generate_noise((image.shape[0], self.action_horizon, self.model.action_dim), seed=self.seed, device='cuda', dtype=torch.bfloat16)
+        noise_value_function = self.generate_noise((image.shape[0], self.value_function_horizon, self.model.value_function_dim), seed=self.seed, device='cuda', dtype=torch.bfloat16)
         batch_size, num_channels, num_frames, height, width = noise_obs.shape
         ######### Generate video #########
         frame_seqlen = int(height * width / 4)
@@ -1197,6 +1208,8 @@ class WANPolicyHead(ActionHead):
                 timestep=timestep * 0,
                 action=None,
                 timestep_action=None,
+                value_function=None,
+                timestep_value_function=None,
                 state=None,
                 embodiment_id=None,
                 context=prompt_embs,
@@ -1225,6 +1238,8 @@ class WANPolicyHead(ActionHead):
                 timestep=timestep * 0,
                 action=None,
                 timestep_action=None,
+                value_function=None,
+                timestep_value_function=None,
                 state=None,
                 embodiment_id=None,
                 context=prompt_embs,
@@ -1243,6 +1258,7 @@ class WANPolicyHead(ActionHead):
 
         noisy_input = noise_obs
         noisy_input_action = noise_action
+        noisy_input_value_function = noise_value_function
 
         # Step 3.1: Spatial denoising loop
 
@@ -1254,9 +1270,15 @@ class WANPolicyHead(ActionHead):
             num_train_timesteps=self.scheduler.num_train_timesteps,
             shift=1,
             use_dynamic_shifting=False)
+        sample_scheduler_value_function = FlowUniPCMultistepScheduler(
+            num_train_timesteps=self.scheduler.num_train_timesteps,
+            shift=1,
+            use_dynamic_shifting=False)
         sample_scheduler.set_timesteps(
             self.num_inference_steps, device=noise_obs.device, shift=self.sigma_shift)
         sample_scheduler_action.set_timesteps(
+            self.num_inference_steps, device=noise_obs.device, shift=self.sigma_shift)
+        sample_scheduler_value_function.set_timesteps(
             self.num_inference_steps, device=noise_obs.device, shift=self.sigma_shift)
 
         # Decoupled inference: video sigmas end at video_final_noise instead of 0
@@ -1281,6 +1303,7 @@ class WANPolicyHead(ActionHead):
 
             # Get timesteps from respective schedulers
             action_timestep = sample_scheduler_action.timesteps[index]
+            value_function_timestep = sample_scheduler_value_function.timesteps[index]
             video_timestep = sample_scheduler.timesteps[index]  # Already rescaled if decoupled
 
             # set current timestep
@@ -1294,6 +1317,11 @@ class WANPolicyHead(ActionHead):
                 device=noise_obs.device,
                 dtype=torch.int64,
             ) * action_timestep
+            timestep_value_function = torch.ones(
+                [batch_size, self.value_function_horizon],
+                device=noise_obs.device,
+                dtype=torch.int64,
+            ) * value_function_timestep
 
             # check if we need to run the DIT step
             should_run_model = self.should_run_model(index, current_timestep, prev_predictions)
@@ -1308,6 +1336,8 @@ class WANPolicyHead(ActionHead):
                     timestep=timestep,
                     action=noisy_input_action,
                     timestep_action=timestep_action,
+                    value_function=noisy_input_value_function,
+                    timestep_value_function=timestep_value_function,
                     state=state_features,
                     embodiment_id=embodiment_id,
                     context=prompt_embs,
@@ -1325,14 +1355,14 @@ class WANPolicyHead(ActionHead):
                 flow_pred_uncond, flow_pred_uncond_action, flow_pred_uncond_value_function = predictions[1]
 
                 flow_pred = flow_pred_uncond + self.cfg_scale * (flow_pred_cond - flow_pred_uncond)
-                prev_predictions.append((current_timestep, flow_pred, flow_pred_cond_action))
+                prev_predictions.append((current_timestep, flow_pred, flow_pred_cond_action, flow_pred_cond_value_function))
                 max_cache_size = 2
                 if len(prev_predictions) > max_cache_size:
                     prev_predictions.pop(0)
 
             else:
                 assert len(prev_predictions) > 0, "prev_predictions must be set when skipping"
-                _, flow_pred, flow_pred_cond_action = prev_predictions[-1]
+                _, flow_pred, flow_pred_cond_action, flow_pred_cond_value_function = prev_predictions[-1]
 
             end_diffusion_events[index].record()
 
@@ -1354,8 +1384,17 @@ class WANPolicyHead(ActionHead):
                 return_dict=False,
             )[0]
 
+            noisy_input_value_function = sample_scheduler_value_function.step(
+                model_output=flow_pred_cond_value_function,
+                timestep=value_function_timestep,
+                sample=noisy_input_value_function,
+                step_index=index,
+                return_dict=False,
+            )[0]
+
         latents = noisy_input
         latents_action = noisy_input_action
+        latents_value_function = noisy_input_value_function
         output = latents
 
         if self.current_start_frame == 1:
@@ -1385,7 +1424,11 @@ class WANPolicyHead(ActionHead):
                   f"DIT Compute Steps {dit_compute_steps} steps, "
                   f"Scheduler {scheduler_time:.2f} seconds")
 
-        return BatchFeature(data={"action_pred": latents_action, "video_pred": output.transpose(1, 2)})
+        return BatchFeature(data={
+            "action_pred": latents_action,
+            "video_pred": output.transpose(1, 2),
+            "value_function_pred": latents_value_function,
+        })
     
     def cache_predict_order1(self, current_timestep, timestep_1, f1, timestep_2, f2):
         h_curr = current_timestep - timestep_1

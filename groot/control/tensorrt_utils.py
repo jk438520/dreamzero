@@ -223,8 +223,10 @@ def export_to_onnx_ar_14B(pytorch_model, test_inputs, onnx_path="tensorrt/wan_mo
         "action",
         "timestep_action",
         "state",
+        "value_function",
+        "timestep_value_function",
     ]
-    output_names = ["video_noise_pred", "action_noise_pred"]
+    output_names = ["video_noise_pred", "action_noise_pred", "value_function_noise_pred"]
 
     try:
         with torch.no_grad():
@@ -712,6 +714,8 @@ class WanTrtModelAr14B(torch.nn.Module):
         action=None,
         timestep_action=None,
         state=None,
+        value_function=None,
+        timestep_value_function=None,
     ):
 
         kv_cache_packed = torch.stack(kv_cache, dim=0)
@@ -725,7 +729,8 @@ class WanTrtModelAr14B(torch.nn.Module):
         self.engine.set_runtime_tensor_shape("action", action.shape)
         self.engine.set_runtime_tensor_shape("timestep_action", timestep_action.shape)
         self.engine.set_runtime_tensor_shape("state", state.shape)
-
+        self.engine.set_runtime_tensor_shape("value_function", value_function.shape)
+        self.engine.set_runtime_tensor_shape("timestep_value_function", timestep_value_function.shape)
 
         output = self.engine(
             x.to(torch.float16),
@@ -737,7 +742,10 @@ class WanTrtModelAr14B(torch.nn.Module):
             action.to(torch.float16),
             timestep_action.to(torch.float16),
             state.to(torch.float16),
+            value_function.to(torch.float16),
+            timestep_value_function.to(torch.float16),
         )
+
         if isinstance(output, list):
             output = {f"out.{i}": tensor for i, tensor in enumerate(output)}
 
@@ -848,7 +856,11 @@ def create_wan_test_inputs(policy, device="cuda", model_type="5B"):
             )
         kv_cache_packed = torch.stack(kv_cache, dim=0)
         crossattn_packed = torch.stack(crossattn_k_cache, dim=0)
-        return (x, timestep, context, kv_cache_packed, y, clip_feature, action, timestep_action, state)
+        value_function_horizon = int(policy.trained_model.action_head.value_function_horizon)
+        value_function_dim = int(policy.trained_model.action_head.config.value_function_dim)
+        value_function = torch.randn(1, value_function_horizon, value_function_dim, dtype=dtype, device=device)
+        timestep_value_function = torch.randn(1, value_function_horizon, dtype=dtype, device=device)
+        return (x, timestep, context, kv_cache_packed, y, clip_feature, action, timestep_action, state, value_function, timestep_value_function)
     elif model_type == "ar_14B_droid":
         clip_feature = torch.randn(1, 257, 1280, dtype=dtype, device=device)
         y = torch.randn(1, 20, 2, 44, 80, dtype=dtype, device=device)
@@ -879,6 +891,10 @@ def create_wan_test_inputs(policy, device="cuda", model_type="5B"):
             )
         kv_cache_packed = torch.stack(kv_cache, dim=0)
         crossattn_packed = torch.stack(crossattn_k_cache, dim=0)
-        return (x, timestep, context, kv_cache_packed, y, clip_feature, action, timestep_action, state)
+        value_function_horizon = int(policy.trained_model.action_head.value_function_horizon)
+        value_function_dim = int(policy.trained_model.action_head.config.value_function_dim)
+        value_function = torch.randn(1, value_function_horizon, value_function_dim, dtype=dtype, device=device)
+        timestep_value_function = torch.randn(1, value_function_horizon, dtype=dtype, device=device)
+        return (x, timestep, context, kv_cache_packed, y, clip_feature, action, timestep_action, state, value_function, timestep_value_function)
 
 

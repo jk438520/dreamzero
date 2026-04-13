@@ -91,6 +91,9 @@ action_head_cfg:
 
     action_dim: ${max_action_dim}
     action_horizon: ${action_horizon}
+    value_function_horizon: ${value_function_horizon}
+    num_value_function_per_block: ${num_value_function_per_block}
+    value_function_dim: ${max_value_function_dim}
     num_inference_timesteps: 4  # not used during training
     noise_beta_alpha: 1.5
     noise_beta_beta: 1.0

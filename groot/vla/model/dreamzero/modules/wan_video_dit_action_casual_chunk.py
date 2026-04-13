@@ -2046,6 +2046,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         action,
         timestep_action,
         state,
+        value_function,
+        timestep_value_function,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
 
 
@@ -2070,6 +2072,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             action=action,
             timestep_action=timestep_action,
             state=state,
+            value_function=value_function,
+            timestep_value_function=timestep_value_function,
             current_start_frame = current_start_frame,
         ) 
 
@@ -2086,6 +2090,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         action,
         timestep_action,
         state,
+        value_function,
+        timestep_value_function,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
 
 
@@ -2110,6 +2116,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             action=action,
             timestep_action=timestep_action,
             state=state,
+            value_function=value_function,
+            timestep_value_function=timestep_value_function,
             current_start_frame = current_start_frame,
         ) 
 

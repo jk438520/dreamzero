@@ -17,6 +17,7 @@ use_global_metadata: false
 num_frames: 49
 action_horizon: 48
 state_horizon: 1
+value_function_horizon: 48
 
 # image_resolution_width: 832
 # image_resolution_height: 480
