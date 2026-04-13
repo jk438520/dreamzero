@@ -14,6 +14,7 @@ train_architecture: "lora"
 num_frame_per_block: 1
 num_action_per_block: 32
 num_state_per_block: 1
+num_value_function_per_block: 32
 frame_seqlen: 880
 action_head_cfg:
   _target_: groot.vla.model.dreamzero.action_head.wan_flow_matching_action_tf.WANPolicyHead
@@ -74,6 +75,7 @@ action_head_cfg:
       num_frame_per_block: ${num_frame_per_block}
       num_action_per_block: ${num_action_per_block}
       num_state_per_block: ${num_state_per_block}
+      num_value_function_per_block: ${num_value_function_per_block}
     text_encoder_cfg:
       _target_: groot.vla.model.dreamzero.modules.wan_video_text_encoder.WanTextEncoder
       _convert_: object
@@ -89,6 +91,9 @@ action_head_cfg:
 
     action_dim: ${max_action_dim}
     action_horizon: ${action_horizon}
+    value_function_horizon: ${value_function_horizon}
+    num_value_function_per_block: ${num_value_function_per_block}
+    value_function_dim: ${max_value_function_dim}
     num_inference_timesteps: 4  # not used during training
     noise_beta_alpha: 1.5
     noise_beta_beta: 1.0
@@ -103,6 +108,7 @@ action_head_cfg:
     # Beta(3,1): mean=0.75, Beta(5,1): mean=0.83 (higher alpha = more bias to high noise)
     video_noise_beta_alpha: 3.0
     video_noise_beta_beta: 1.0
+    value_function_loss_coeff: 1.0
 
     tune_projector: true
     tune_diffusion_model: true

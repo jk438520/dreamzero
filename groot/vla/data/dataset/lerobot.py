@@ -1559,13 +1559,29 @@ class LeRobotSingleDataset(Dataset):
         # Get the state or action configuration
         state_or_action_cfg = getattr(self.metadata.modalities, modality)[subkey]
 
+        sampled_indices = step_indices
+        if modality == "action":
+            sampled_indices, _ = self._get_action_aligned_indices(trajectory_id, step_indices)
+
         # Pad the data
         return self.retrieve_data_and_pad(
             array=data_array,
-            step_indices=step_indices,
+            step_indices=sampled_indices,
             max_length=max_length,
             padding_strategy="first_last" if state_or_action_cfg.absolute else "zero",
         )
+
+    def _get_action_aligned_indices(
+        self,
+        trajectory_id: int,
+        step_indices: np.ndarray,
+    ) -> tuple[np.ndarray, int]:
+        """Build action-aligned indices shared by action and rl_info retrieval."""
+        trajectory_index = self.get_trajectory_index(trajectory_id)
+        max_length = self.trajectory_lengths[trajectory_index]
+        sampled_indices = np.maximum(step_indices, 0)
+        sampled_indices = np.minimum(sampled_indices, max_length - 1)
+        return sampled_indices, max_length
 
     def get_lapa_action(
         self,
@@ -1743,10 +1759,7 @@ class LeRobotSingleDataset(Dataset):
         Returns:
             np.ndarray: The reward data for the trajectory and step indices.
         """
-        # Get the trajectory index
-        trajectory_index = self.get_trajectory_index(trajectory_id)
-        # Get the maximum length of the trajectory
-        max_length = self.trajectory_lengths[trajectory_index]
+        sampled_indices, max_length = self._get_action_aligned_indices(trajectory_id, step_indices)
         data_array: np.ndarray = np.stack(self.curr_traj_data[key])  # type: ignore
 
         if key == "rl_info.next.reward":
@@ -1757,7 +1770,7 @@ class LeRobotSingleDataset(Dataset):
         # Pad the data
         return self.retrieve_data_and_pad(
             array=data_array,
-            step_indices=step_indices,
+            step_indices=sampled_indices,
             max_length=max_length,
             padding_strategy=padding_strategy,
         )

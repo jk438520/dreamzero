@@ -90,11 +90,11 @@ class MultiEmbodimentActionEncoder(nn.Module):
         return x
 
 
-def causal_rope_action_apply(x, freqs, freqs_action, freqs_state, action_register_length, num_action_per_block, num_state_per_block, action_state_index):
+def causal_rope_action_apply(x, freqs, freqs_action, freqs_state, freqs_value_function, action_register_length, num_action_per_block, num_state_per_block, num_value_function_per_block, action_state_index):
     if ENABLE_TENSORRT:
-        return causal_rope_action_apply_no_polar(x, freqs, freqs_action, freqs_state, action_register_length, num_action_per_block, num_state_per_block, action_state_index)
+        return causal_rope_action_apply_no_polar(x, freqs, freqs_action, freqs_state, freqs_value_function, action_register_length, num_action_per_block, num_state_per_block, num_value_function_per_block, action_state_index)
     else:
-        return causal_rope_action_apply_polar(x, freqs, freqs_action, freqs_state, action_register_length, num_action_per_block, num_state_per_block, action_state_index)
+        return causal_rope_action_apply_polar(x, freqs, freqs_action, freqs_state, freqs_value_function, action_register_length, num_action_per_block, num_state_per_block, num_value_function_per_block, action_state_index)
 
 
 def causal_rope_action_apply_no_polar(
@@ -102,9 +102,11 @@ def causal_rope_action_apply_no_polar(
     freqs: torch.Tensor,
     freqs_action: torch.Tensor,
     freqs_state: torch.Tensor,
+    freqs_value_function: torch.Tensor,
     action_register_length: int | None,
     num_action_per_block: int,
     num_state_per_block: int,
+    num_value_function_per_block: int,
     action_state_index: int,
 ):
     B, seq_len, n, d = x.shape
@@ -121,7 +123,7 @@ def causal_rope_action_apply_no_polar(
     
     #  Handle the Action/State Register Frequencies
     if action_register_length is not None:
-        assert action_register_length == (num_action_per_block + num_state_per_block)
+        assert action_register_length == (num_action_per_block + num_state_per_block + num_value_function_per_block)
         
         freqs_action_slice = freqs_action[
             action_state_index * num_action_per_block:(action_state_index + 1) * num_action_per_block
@@ -129,9 +131,12 @@ def causal_rope_action_apply_no_polar(
         freqs_state_slice = freqs_state[
             action_state_index * num_state_per_block:(action_state_index + 1) * num_state_per_block
         ]
+        freqs_value_function_slice = freqs_value_function[
+            action_state_index * num_value_function_per_block:(action_state_index + 1) * num_value_function_per_block
+        ]
         
         # Combine the action/state tokens for this frame
-        freqs_1d = torch.cat([freqs_action_slice, freqs_state_slice], dim=0).view(
+        freqs_1d = torch.cat([freqs_action_slice, freqs_state_slice, freqs_value_function_slice], dim=0).view(
             action_register_length, 1, -1, 2
         )
         
@@ -155,9 +160,11 @@ def causal_rope_action_apply_polar(
     freqs: torch.Tensor,
     freqs_action: torch.Tensor,
     freqs_state: torch.Tensor,
+    freqs_value_function: torch.Tensor,
     action_register_length: int | None,
     num_action_per_block: int,
     num_state_per_block: int,
+    num_value_function_per_block: int,
     action_state_index: int,
 ):
     B, seq_len, n, _ = x.shape
@@ -168,14 +175,17 @@ def causal_rope_action_apply_polar(
     )
 
     if action_register_length is not None:
-        assert action_register_length == (num_action_per_block + num_state_per_block)
+        assert action_register_length == (num_action_per_block + num_state_per_block + num_value_function_per_block)
         freqs_action = freqs_action[
             action_state_index * num_action_per_block:(action_state_index + 1) * num_action_per_block
         ]
         freqs_state = freqs_state[
             action_state_index * num_state_per_block:(action_state_index + 1) * num_state_per_block
         ]
-        freqs_1d = torch.cat([freqs_action, freqs_state], dim=0).view(action_register_length, 1, -1)
+        freqs_value_function = freqs_value_function[
+            action_state_index * num_value_function_per_block:(action_state_index + 1) * num_value_function_per_block
+        ]
+        freqs_1d = torch.cat([freqs_action, freqs_state, freqs_value_function], dim=0).view(action_register_length, 1, -1)
         freqs = torch.cat([freqs, freqs_1d], dim=0)
 
     # apply rotary embedding
@@ -197,7 +207,8 @@ class CausalWanSelfAttention(nn.Module):
                  qk_norm=True,
                  eps=1e-6,
                  num_action_per_block=32,
-                 num_state_per_block=1):
+                 num_state_per_block=1,
+                 num_value_function_per_block=1):
         assert dim % num_heads == 0
         super().__init__()
         self.dim = dim
@@ -212,6 +223,7 @@ class CausalWanSelfAttention(nn.Module):
         self.frame_seqlen = frame_seqlen
         self.num_action_per_block = num_action_per_block
         self.num_state_per_block = num_state_per_block
+        self.num_value_function_per_block = num_value_function_per_block
         # layers
         self.q = nn.Linear(dim, dim)
         self.k = nn.Linear(dim, dim)
@@ -223,12 +235,12 @@ class CausalWanSelfAttention(nn.Module):
         self.causal_attn = AttentionModule(num_heads=self.num_heads, head_dim=self.head_dim, causal=True)
 
     def _visualize_attention_mask(self, total_len, first_image_len, image_blocks_len, 
-                                   action_len, state_len, num_image_blocks, 
-                                   num_action_blocks, num_state_blocks,
+                                   action_len, state_len, value_function_len, num_image_blocks, 
+                                   num_action_blocks, num_state_blocks, num_value_function_blocks,
                                    num_frame_per_block, frame_seqlen,
-                                   num_action_per_block, num_state_per_block):
+                                   num_action_per_block, num_state_per_block, num_value_function_per_block):
         """
-        Create and print a visualization of the attention mask pattern.
+        Create and print a visualization of the attention mas`k pattern.
         Returns a binary mask [total_len, total_len] where 1 = can attend, 0 = cannot attend.
         """
         # Token ranges
@@ -240,6 +252,8 @@ class CausalWanSelfAttention(nn.Module):
         action_end = action_start + action_len
         state_start = action_end
         state_end = state_start + state_len
+        value_function_start = state_end
+        value_function_block_end = value_function_start + value_function_len
         
         # Create mask tensor
         mask = torch.zeros(total_len, total_len, dtype=torch.bool)
@@ -302,11 +316,33 @@ class CausalWanSelfAttention(nn.Module):
             state_block_end = state_start + (block_idx + 1) * num_state_per_block
             mask[state_block_start:state_block_end, state_block_start:state_block_end] = True
         
+        # Value function blocks: same denoising-style context as image/action blocks
+        for block_idx in range(num_value_function_blocks):
+            value_function_block_start = value_function_start + block_idx * num_value_function_per_block
+            value_function_block_end = value_function_start + (block_idx + 1) * num_value_function_per_block
+            mask[value_function_block_start:value_function_block_end, value_function_block_start:value_function_block_end] = True
+
+            mask[value_function_block_start:value_function_block_end, first_image_start:first_image_end] = True
+
+            image_block_end = image_blocks_start + (block_idx + 1) * num_frame_per_block * frame_seqlen
+            if self.local_attn_size != -1:
+                image_kv_start = max(image_blocks_start, image_block_end - self.local_attn_size * frame_seqlen)
+            else:
+                image_kv_start = image_blocks_start
+            mask[value_function_block_start:value_function_block_end, image_kv_start:image_block_end] = True
+
+            action_block_start = action_start + block_idx * num_action_per_block
+            action_block_end = action_start + (block_idx + 1) * num_action_per_block
+            state_block_start = state_start + block_idx * num_state_per_block
+            state_block_end = state_start + (block_idx + 1) * num_state_per_block
+            mask[value_function_block_start:value_function_block_end, action_block_start:action_block_end] = True
+            mask[value_function_block_start:value_function_block_end, state_block_start:state_block_end] = True
+        
         return mask
 
     def _blockwise_causal_flash_attn(self, q, k, v, frame_seqlen, num_frame_per_block=1, 
-                                       action_horizon=None, state_horizon=None, 
-                                       num_action_per_block=None, num_state_per_block=None,
+                                       action_horizon=None, state_horizon=None, value_function_horizon=None,
+                                       num_action_per_block=None, num_state_per_block=None, num_value_function_per_block=None,
                                        visualize_mask=False):
         """
         Implement blockwise causal attention using flash_attention.
@@ -377,17 +413,20 @@ class CausalWanSelfAttention(nn.Module):
 
         assert action_horizon is not None and state_horizon is not None
         assert num_action_per_block is not None and num_state_per_block is not None
+        assert value_function_horizon is not None and num_value_function_per_block is not None
 
         # Multi-modal structure: [first image] [image blocks] [action blocks] [state blocks]
         # Calculate block structure
         first_image_len = frame_seqlen
         action_len = action_horizon
         state_len = state_horizon
-        image_blocks_len = total_len - first_image_len - action_len - state_len
+        value_function_len = value_function_horizon
+        image_blocks_len = total_len - first_image_len - action_len - state_len - value_function_len
         
         num_image_blocks = image_blocks_len // (num_frame_per_block * frame_seqlen)
         num_action_blocks = action_horizon // num_action_per_block
         num_state_blocks = state_horizon // num_state_per_block
+        num_value_function_blocks = value_function_horizon // num_value_function_per_block
 
         assert num_image_blocks == num_action_blocks == num_state_blocks
         
@@ -400,16 +439,18 @@ class CausalWanSelfAttention(nn.Module):
         action_end = action_start + action_len
         state_start = action_end
         state_end = state_start + state_len
+        value_function_start = state_end
+        value_function_end = value_function_start + value_function_len
         
         # Visualize attention mask if requested
         if visualize_mask:
             mask = self._visualize_attention_mask(
                 total_len, first_image_len, image_blocks_len, 
-                action_len, state_len, num_image_blocks,
-                num_action_blocks, num_state_blocks,
+                action_len, state_len, value_function_len, num_image_blocks, 
+                num_action_blocks, num_state_blocks, num_value_function_blocks,
                 num_frame_per_block, frame_seqlen,
-                num_action_per_block, num_state_per_block
-            )
+                num_action_per_block, num_state_per_block, num_value_function_per_block
+                )
             
             print("\n" + "="*80)
             print("ATTENTION MASK VISUALIZATION")
@@ -419,6 +460,7 @@ class CausalWanSelfAttention(nn.Module):
             print(f"Image blocks: [{image_blocks_start}:{image_blocks_end}] (len={image_blocks_len}, num_blocks={num_image_blocks})")
             print(f"Action tokens: [{action_start}:{action_end}] (len={action_len}, num_blocks={num_action_blocks})")
             print(f"State tokens: [{state_start}:{state_end}] (len={state_len}, num_blocks={num_state_blocks})")
+            print(f"Value function tokens: [{value_function_start}:{value_function_end}] (len={value_function_len}, num_blocks={num_value_function_blocks})")
             print(f"Local attention size: {self.local_attn_size}")
             print("-"*80)
             
@@ -479,6 +521,11 @@ class CausalWanSelfAttention(nn.Module):
         state_block_starts = [state_start + i * num_state_per_block for i in range(num_state_blocks)]
         state_block_ends = [state_start + (i + 1) * num_state_per_block for i in range(num_state_blocks)]
         
+        # Pre-compute value function block indices
+        value_function_block_starts = [value_function_start + i * num_value_function_per_block for i in range(num_value_function_blocks)]
+        value_function_block_ends = [value_function_start + (i + 1) * num_value_function_per_block for i in range(num_value_function_blocks)]
+        
+        
         # Process each image block
         for block_idx in range(num_image_blocks):
             block_start = image_block_starts[block_idx]
@@ -488,19 +535,23 @@ class CausalWanSelfAttention(nn.Module):
             action_block_end = action_block_ends[block_idx]
             state_block_start = state_block_starts[block_idx]
             state_block_end = state_block_ends[block_idx]
+            value_function_block_start = value_function_block_starts[block_idx]
+            value_function_block_end = value_function_block_ends[block_idx]
             
             # Build context: first image + relevant image blocks + current action + current state
             k_context = torch.cat([
                 k[:, first_image_start:first_image_end],  # First image
                 k[:, image_kv_start:block_end],  # Image blocks
                 k[:, action_block_start:action_block_end],  # Current action block
-                k[:, state_block_start:state_block_end]  # Current state block
+                k[:, state_block_start:state_block_end],  # Current state block
+                k[:, value_function_block_start:value_function_block_end]  # Current value function block
             ], dim=1)
             v_context = torch.cat([
                 v[:, first_image_start:first_image_end],
                 v[:, image_kv_start:block_end],
                 v[:, action_block_start:action_block_end],
-                v[:, state_block_start:state_block_end]
+                v[:, state_block_start:state_block_end],
+                v[:, value_function_block_start:value_function_block_end]
             ], dim=1)
             
             output[:, block_start:block_end] = self.attn(
@@ -514,6 +565,8 @@ class CausalWanSelfAttention(nn.Module):
             image_block_end = image_block_ends[block_idx]
             state_block_start = state_block_starts[block_idx]
             state_block_end = state_block_ends[block_idx]
+            value_function_block_start = value_function_block_starts[block_idx]
+            value_function_block_end = value_function_block_ends[block_idx]
             
             # Determine image context range
             if self.local_attn_size != -1:
@@ -526,13 +579,15 @@ class CausalWanSelfAttention(nn.Module):
                 k[:, first_image_start:first_image_end],  # First image
                 k[:, image_kv_start:image_block_end],  # Image blocks
                 k[:, action_block_start:action_block_end],  # Current action block
-                k[:, state_block_start:state_block_end]  # Current state block
+                k[:, state_block_start:state_block_end],  # Current state block
+                k[:, value_function_block_start:value_function_block_end]  # Current value function block
             ], dim=1)
             v_context = torch.cat([
                 v[:, first_image_start:first_image_end],
                 v[:, image_kv_start:image_block_end],
                 v[:, action_block_start:action_block_end],
-                v[:, state_block_start:state_block_end]
+                v[:, state_block_start:state_block_end],
+                v[:, value_function_block_start:value_function_block_end]
             ], dim=1)
             
             output[:, action_block_start:action_block_end] = self.attn(
@@ -548,6 +603,17 @@ class CausalWanSelfAttention(nn.Module):
                 q[:, state_block_start:state_block_end],
                 k[:, state_block_start:state_block_end],
                 v[:, state_block_start:state_block_end]
+            )
+        
+        # Process value function blocks (conditioning, can only self-attend)
+        for block_idx in range(num_value_function_blocks):
+            value_function_block_start = value_function_block_starts[block_idx]
+            value_function_block_end = value_function_block_ends[block_idx]
+            
+            output[:, value_function_block_start:value_function_block_end] = self.attn(
+                q[:, value_function_block_start:value_function_block_end],
+                k[:, value_function_block_start:value_function_block_end],
+                v[:, value_function_block_start:value_function_block_end]
             )
         
         return output
@@ -661,6 +727,7 @@ class CausalWanSelfAttention(nn.Module):
     def _process_noisy_image_blocks(self, noisy_image_q, noisy_image_k, noisy_image_v,
                                      clean_image_k, clean_image_v,
                                      noisy_action_k, noisy_action_v, noisy_state_k, noisy_state_v,
+                                     noisy_value_function_k, noisy_value_function_v,
                                      half_frames, action_horizon, state_horizon):
         """Process noisy image blocks with teacher forcing pattern - OPTIMIZED
         
@@ -693,6 +760,8 @@ class CausalWanSelfAttention(nn.Module):
         action_block_ends = [start + self.num_action_per_block for start in action_block_starts]
         state_block_starts = [i * self.num_state_per_block for i in range(num_blocks)]
         state_block_ends = [start + self.num_state_per_block for start in state_block_starts]
+        value_function_block_starts = [i * self.num_value_function_per_block for i in range(num_blocks)]
+        value_function_block_ends = [start + self.num_value_function_per_block for start in value_function_block_starts]
         
         # Process noisy image blocks
         for block_idx in range(num_blocks):
@@ -703,7 +772,9 @@ class CausalWanSelfAttention(nn.Module):
             action_end = action_block_ends[block_idx]
             state_start = state_block_starts[block_idx]
             state_end = state_block_ends[block_idx]
-            
+            value_function_start = value_function_block_starts[block_idx]
+            value_function_end = value_function_block_ends[block_idx]
+
             q_block = noisy_image_q[:, noisy_start:noisy_end]
             
             # Build context: first_clean_frame + clean_blocks[0:i] + current_noisy_block + action[i] + state[i]
@@ -711,13 +782,15 @@ class CausalWanSelfAttention(nn.Module):
                 clean_image_k[:, :clean_end],
                 noisy_image_k[:, noisy_start:noisy_end],
                 noisy_action_k[:, action_start:action_end],
-                noisy_state_k[:, state_start:state_end]
+                noisy_state_k[:, state_start:state_end],
+                noisy_value_function_k[:, value_function_start:value_function_end]
             ], dim=1)
             v_context = torch.cat([
                 clean_image_v[:, :clean_end],
                 noisy_image_v[:, noisy_start:noisy_end],
                 noisy_action_v[:, action_start:action_end],
-                noisy_state_v[:, state_start:state_end]
+                noisy_state_v[:, state_start:state_end],
+                noisy_value_function_v[:, value_function_start:value_function_end]
             ], dim=1)
             
             output[:, noisy_start:noisy_end] = self.attn(q_block, k_context, v_context)
@@ -728,6 +801,7 @@ class CausalWanSelfAttention(nn.Module):
                                       clean_image_k, clean_image_v,
                                       noisy_image_k, noisy_image_v,
                                       noisy_state_k, noisy_state_v,
+                                      noisy_value_function_k, noisy_value_function_v,
                                       half_frames, action_horizon, state_horizon):
         """Process noisy action blocks with teacher forcing pattern - OPTIMIZED
         
@@ -752,6 +826,8 @@ class CausalWanSelfAttention(nn.Module):
         noisy_image_block_ends = [start + self.frame_seqlen * self.num_frame_per_block for start in noisy_image_block_starts]
         state_block_starts = [i * self.num_state_per_block for i in range(num_blocks)]
         state_block_ends = [start + self.num_state_per_block for start in state_block_starts]
+        value_function_block_starts = [i * self.num_value_function_per_block for i in range(num_blocks)]
+        value_function_block_ends = [start + self.num_value_function_per_block for start in value_function_block_starts]
         
         # Process noisy action blocks
         for block_idx in range(num_blocks):
@@ -762,6 +838,8 @@ class CausalWanSelfAttention(nn.Module):
             noisy_img_end = noisy_image_block_ends[block_idx]
             state_start = state_block_starts[block_idx]
             state_end = state_block_ends[block_idx]
+            value_function_start = value_function_block_starts[block_idx]
+            value_function_end = value_function_block_ends[block_idx]
             
             q_block = noisy_action_q[:, action_start:action_end]
             
@@ -770,17 +848,80 @@ class CausalWanSelfAttention(nn.Module):
                 clean_image_k[:, :clean_end],
                 noisy_image_k[:, noisy_img_start:noisy_img_end],
                 noisy_action_k[:, action_start:action_end],
-                noisy_state_k[:, state_start:state_end]
+                noisy_state_k[:, state_start:state_end],
+                noisy_value_function_k[:, value_function_start:value_function_end]
             ], dim=1)
             v_context = torch.cat([
                 clean_image_v[:, :clean_end],
                 noisy_image_v[:, noisy_img_start:noisy_img_end],
                 noisy_action_v[:, action_start:action_end],
-                noisy_state_v[:, state_start:state_end]
+                noisy_state_v[:, state_start:state_end],
+                noisy_value_function_v[:, value_function_start:value_function_end]
             ], dim=1)
             
             output[:, action_start:action_end] = self.attn(q_block, k_context, v_context)
         
+        return output
+
+    def _process_value_function_blocks(self, value_function_q, value_function_k, value_function_v,
+                                       clean_image_k, clean_image_v,
+                                       noisy_image_k, noisy_image_v,
+                                       noisy_action_k, noisy_action_v,
+                                       noisy_state_k, noisy_state_v,
+                                       half_frames, value_function_horizon):
+        """Process value-function blocks with the same denoising-style context as image/action blocks."""
+        num_blocks = value_function_horizon // self.num_value_function_per_block
+
+        if num_blocks == 0:
+            return torch.empty_like(value_function_q)
+
+        output = torch.empty_like(value_function_q)
+
+        value_block_starts = [i * self.num_value_function_per_block for i in range(num_blocks)]
+        value_block_ends = [start + self.num_value_function_per_block for start in value_block_starts]
+        clean_context_ends = [self.frame_seqlen + i * self.frame_seqlen * self.num_frame_per_block for i in range(num_blocks)]
+        image_block_starts = [self.frame_seqlen + i * self.frame_seqlen * self.num_frame_per_block for i in range(num_blocks)]
+        image_block_ends = [start + self.frame_seqlen * self.num_frame_per_block for start in image_block_starts]
+        action_block_starts = [i * self.num_action_per_block for i in range(num_blocks)]
+        action_block_ends = [start + self.num_action_per_block for start in action_block_starts]
+        state_block_starts = [i * self.num_state_per_block for i in range(num_blocks)]
+        state_block_ends = [start + self.num_state_per_block for start in state_block_starts]
+
+        for block_idx in range(num_blocks):
+            value_function_block_start = value_block_starts[block_idx]
+            value_function_block_end = value_block_ends[block_idx]
+
+            clean_end = clean_context_ends[block_idx]
+            image_block_start = image_block_starts[block_idx]
+            image_block_end = image_block_ends[block_idx]
+            action_start = action_block_starts[block_idx]
+            action_end = action_block_ends[block_idx]
+            state_start = state_block_starts[block_idx]
+            state_end = state_block_ends[block_idx]
+
+            q_block = value_function_q[:, value_function_block_start:value_function_block_end]
+
+            k_context = torch.cat([
+                clean_image_k[:, :clean_end],
+                noisy_image_k[:, image_block_start:image_block_end],
+                noisy_action_k[:, action_start:action_end],
+                noisy_state_k[:, state_start:state_end],
+                value_function_k[:, value_function_block_start:value_function_block_end],
+            ], dim=1)
+            v_context = torch.cat([
+                clean_image_v[:, :clean_end],
+                noisy_image_v[:, image_block_start:image_block_end],
+                noisy_action_v[:, action_start:action_end],
+                noisy_state_v[:, state_start:state_end],
+                value_function_v[:, value_function_block_start:value_function_block_end],
+            ], dim=1)
+
+            output[:, value_function_block_start:value_function_block_end] = self.attn(
+                q_block,
+                k_context,
+                v_context,
+            )
+
         return output
 
     def forward(
@@ -789,6 +930,7 @@ class CausalWanSelfAttention(nn.Module):
         freqs: torch.Tensor,
         freqs_action: torch.Tensor,
         freqs_state: torch.Tensor,
+        freqs_value_function: torch.Tensor,
         action_register_length: int | None,
         kv_cache: torch.Tensor | None = None,
         current_start_frame: int = 0,
@@ -828,13 +970,14 @@ class CausalWanSelfAttention(nn.Module):
                     k_noisy = k[:, s//2:]
                 roped_query = []
                 roped_key = []
-
+    
                 # rope should be same for clean and noisy parts
                 rq_context = rope_action_apply(
                     x=q_context,
                     freqs=freqs,
                     freqs_action=freqs_action,
                     freqs_state=freqs_state,
+                    freqs_value_function=freqs_value_function,
                     action_register_length=None,
                 ).type_as(v)
                 rk_context = rope_action_apply(
@@ -842,6 +985,7 @@ class CausalWanSelfAttention(nn.Module):
                     freqs=freqs,
                     freqs_action=freqs_action,
                     freqs_state=freqs_state,
+                    freqs_value_function=freqs_value_function,
                     action_register_length=None,
                 ).type_as(v)
 
@@ -850,18 +994,22 @@ class CausalWanSelfAttention(nn.Module):
                     freqs=freqs,
                     freqs_action=freqs_action,
                     freqs_state=freqs_state,
+                    freqs_value_function=freqs_value_function,
                     action_register_length=action_register_length,
                     num_action_per_block=self.num_action_per_block,
                     num_state_per_block=self.num_state_per_block,
+                    num_value_function_per_block=self.num_value_function_per_block,
                 ).type_as(v)
                 rk_noisy = rope_action_apply(
                     x=k_noisy,
                     freqs=freqs,
                     freqs_action=freqs_action,
                     freqs_state=freqs_state,
+                    freqs_value_function=freqs_value_function,
                     action_register_length=action_register_length,
                     num_action_per_block=self.num_action_per_block,
                     num_state_per_block=self.num_state_per_block,
+                    num_value_function_per_block=self.num_value_function_per_block,
                 ).type_as(v)
 
                 roped_query.append(rq_context)
@@ -890,6 +1038,7 @@ class CausalWanSelfAttention(nn.Module):
                     num_image_blocks = (noisy_frames - 1) // self.num_frame_per_block
                     action_horizon = num_image_blocks * self.num_action_per_block
                     state_horizon = num_image_blocks * self.num_state_per_block
+                    value_function_horizon = num_image_blocks * self.num_value_function_per_block
                     
                     # Split clean and noisy parts
                     # Clean: [image tokens only]
@@ -897,21 +1046,24 @@ class CausalWanSelfAttention(nn.Module):
                     clean_image_k = roped_key[:, :clean_image_seq_len]
                     clean_image_v = v[:, :clean_image_seq_len]
 
-                    assert roped_query.shape[1] == half_seq_len + noisy_image_seq_len + action_horizon + state_horizon
+                    assert roped_query.shape[1] == half_seq_len + noisy_image_seq_len + action_horizon + state_horizon + value_function_horizon
                     
-                    # Noisy: [image tokens][action tokens][state tokens]
+                    # Noisy: [image tokens][action tokens][state tokens][value function tokens]
                     noisy_image_q = roped_query[:, half_seq_len:half_seq_len + noisy_image_seq_len]
                     noisy_action_q = roped_query[:, half_seq_len + noisy_image_seq_len:half_seq_len + noisy_image_seq_len + action_horizon]
-                    noisy_state_q = roped_query[:, half_seq_len + noisy_image_seq_len + action_horizon:]
-                    
+                    noisy_state_q = roped_query[:, half_seq_len + noisy_image_seq_len + action_horizon:half_seq_len + noisy_image_seq_len + action_horizon + state_horizon]
+                    noisy_value_function_q = roped_query[:, half_seq_len + noisy_image_seq_len + action_horizon + state_horizon:]
+
                     noisy_image_k = roped_key[:, half_seq_len:half_seq_len + noisy_image_seq_len]
                     noisy_action_k = roped_key[:, half_seq_len + noisy_image_seq_len:half_seq_len + noisy_image_seq_len + action_horizon]
-                    noisy_state_k = roped_key[:, half_seq_len + noisy_image_seq_len + action_horizon:]
+                    noisy_state_k = roped_key[:, half_seq_len + noisy_image_seq_len + action_horizon:half_seq_len + noisy_image_seq_len + action_horizon + state_horizon]
+                    noisy_value_function_k = roped_key[:, half_seq_len + noisy_image_seq_len + action_horizon + state_horizon:]
                     
                     noisy_image_v = v[:, half_seq_len:half_seq_len + noisy_image_seq_len]
                     noisy_action_v = v[:, half_seq_len + noisy_image_seq_len:half_seq_len + noisy_image_seq_len + action_horizon]
-                    noisy_state_v = v[:, half_seq_len + noisy_image_seq_len + action_horizon:]
-                    
+                    noisy_state_v = v[:, half_seq_len + noisy_image_seq_len + action_horizon:half_seq_len + noisy_image_seq_len + action_horizon + state_horizon]
+                    noisy_value_function_v = v[:, half_seq_len + noisy_image_seq_len + action_horizon + state_horizon:]
+
                     # ========== Process CLEAN (context) image tokens ==========
                     # Clean images: simple blockwise causal attention (no action/state)
                     clean_image_outputs = self._process_clean_image_only(
@@ -923,6 +1075,7 @@ class CausalWanSelfAttention(nn.Module):
                         noisy_image_q, noisy_image_k, noisy_image_v,
                         clean_image_k, clean_image_v,
                         noisy_action_k, noisy_action_v, noisy_state_k, noisy_state_v,
+                        noisy_value_function_k, noisy_value_function_v,
                         noisy_frames, action_horizon, state_horizon)
                     
                     # Noisy action blocks: attend to previous clean image blocks (including first) + current noisy image + current noisy action + same state
@@ -931,16 +1084,27 @@ class CausalWanSelfAttention(nn.Module):
                         clean_image_k, clean_image_v, 
                         noisy_image_k, noisy_image_v,
                         noisy_state_k, noisy_state_v,
+                        noisy_value_function_k, noisy_value_function_v,
                         noisy_frames, action_horizon, state_horizon)
                     
                     # Noisy state blocks: self-attention only
                     noisy_state_outputs = self._process_state_blocks(
                         noisy_state_q, noisy_state_k, noisy_state_v, state_horizon)
+
+                    # Noisy value-function blocks: denoising-style context, same as image/action
+                    noisy_value_function_outputs = self._process_value_function_blocks(
+                        noisy_value_function_q, noisy_value_function_k, noisy_value_function_v,
+                        clean_image_k, clean_image_v,
+                        noisy_image_k, noisy_image_v,
+                        noisy_action_k, noisy_action_v,
+                        noisy_state_k, noisy_state_v,
+                        noisy_frames, value_function_horizon)
                     
-                    # Concatenate all outputs in order: clean_img, noisy_img, noisy_act, noisy_state
+                    # Concatenate all outputs in order: clean_img, noisy_img, noisy_act, noisy_state, value_function
                     x = torch.cat([
                         clean_image_outputs,
-                        noisy_image_outputs, noisy_action_outputs, noisy_state_outputs
+                        noisy_image_outputs, noisy_action_outputs, noisy_state_outputs,
+                        noisy_value_function_outputs,
                     ], dim=1)
                 else:
                     # No action/state tokens, fall back to simple image-only teacher forcing
@@ -972,28 +1136,36 @@ class CausalWanSelfAttention(nn.Module):
                     freqs=freqs,
                     freqs_action=freqs_action,
                     freqs_state=freqs_state,
+                    freqs_value_function=freqs_value_function,
                     action_register_length=action_register_length,
                     num_action_per_block=self.num_action_per_block,
                     num_state_per_block=self.num_state_per_block,
+                    num_value_function_per_block=self.num_value_function_per_block,
                 ).type_as(v)
                 roped_key = rope_action_apply(
                     x=k,
                     freqs=freqs,
                     freqs_action=freqs_action,
                     freqs_state=freqs_state,
+                    freqs_value_function=freqs_value_function,
                     action_register_length=action_register_length,
                     num_action_per_block=self.num_action_per_block,
                     num_state_per_block=self.num_state_per_block,
+                    num_value_function_per_block=self.num_value_function_per_block,
                 ).type_as(v)
 
                 # Calculate dynamic action and state horizons
                 if action_register_length is not None:
-                    chunk_size = action_register_length // (self.num_action_per_block + self.num_state_per_block)
+                    chunk_size = action_register_length // (
+                        self.num_action_per_block + self.num_state_per_block + self.num_value_function_per_block
+                    )
                     action_horizon = chunk_size * self.num_action_per_block
                     state_horizon = chunk_size * self.num_state_per_block
+                    value_function_horizon = chunk_size * self.num_value_function_per_block
                 else:
                     action_horizon = None
                     state_horizon = None
+                    value_function_horizon = None
 
                 # Use blockwise causal flash attention without massive padding
                 visualize = False
@@ -1001,8 +1173,10 @@ class CausalWanSelfAttention(nn.Module):
                     roped_query, roped_key, v, self.frame_seqlen, self.num_frame_per_block,
                     action_horizon=action_horizon,
                     state_horizon=state_horizon,
+                    value_function_horizon=value_function_horizon,
                     num_action_per_block=self.num_action_per_block if action_register_length else None,
                     num_state_per_block=self.num_state_per_block if action_register_length else None,
+                    num_value_function_per_block=self.num_value_function_per_block if action_register_length else None,
                     visualize_mask=visualize)
 
         else:
@@ -1013,9 +1187,11 @@ class CausalWanSelfAttention(nn.Module):
                 freqs=freqs,
                 freqs_action=freqs_action,
                 freqs_state=freqs_state,
+                freqs_value_function=freqs_value_function,
                 action_register_length=action_register_length,
                 num_action_per_block=self.num_action_per_block,
                 num_state_per_block=self.num_state_per_block,
+                num_value_function_per_block=self.num_value_function_per_block,
                 action_state_index=action_state_index,
             ).type_as(v)
             roped_key = causal_rope_action_apply(
@@ -1023,9 +1199,11 @@ class CausalWanSelfAttention(nn.Module):
                 freqs=freqs,
                 freqs_action=freqs_action,
                 freqs_state=freqs_state,
+                freqs_value_function=freqs_value_function,
                 action_register_length=action_register_length,
                 num_action_per_block=self.num_action_per_block,
                 num_state_per_block=self.num_state_per_block,
+                num_value_function_per_block=self.num_value_function_per_block,
                 action_state_index=action_state_index,
             ).type_as(v)
 
@@ -1099,7 +1277,8 @@ class CausalWanAttentionBlock(nn.Module):
                  cross_attn_norm=False,
                  eps=1e-6,
                  num_action_per_block=32,
-                 num_state_per_block=1):
+                 num_state_per_block=1,
+                 num_value_function_per_block=1):
         super().__init__()
         self.dim = dim
         self.ffn_dim = ffn_dim
@@ -1122,6 +1301,7 @@ class CausalWanAttentionBlock(nn.Module):
             eps=eps,
             num_action_per_block=num_action_per_block,
             num_state_per_block=num_state_per_block,
+            num_value_function_per_block=num_value_function_per_block,
         )
         self.norm3 = WanLayerNorm(
             dim, eps,
@@ -1146,6 +1326,7 @@ class CausalWanAttentionBlock(nn.Module):
         freqs: torch.Tensor,
         freqs_action: torch.Tensor,
         freqs_state: torch.Tensor,
+        freqs_value_function: torch.Tensor,
         action_register_length: int | None,
         context: torch.Tensor,
         kv_cache: torch.Tensor | None = None,
@@ -1167,6 +1348,7 @@ class CausalWanAttentionBlock(nn.Module):
             freqs=freqs,
             freqs_action=freqs_action,
             freqs_state=freqs_state,
+            freqs_value_function=freqs_value_function,
             action_register_length=action_register_length,
             kv_cache=kv_cache,
             is_tf=is_tf,
@@ -1247,13 +1429,15 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                  eps=1e-6,
                  num_frame_per_block=1, 
                  action_dim=32,
+                 value_function_dim=1,
                  num_registers=8,
                  max_state_dim=64,
                  max_num_embodiments=32,
                  hidden_size=1024,
                  diffusion_model_pretrained_path=None,
                  num_action_per_block=32,
-                 num_state_per_block=1):
+                 num_state_per_block=1,
+                 num_value_function_per_block=1):
         r"""
         Initialize the diffusion model backbone.
 
@@ -1315,12 +1499,14 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.num_frame_per_block = num_frame_per_block
         self.diffusion_model_pretrained_path = diffusion_model_pretrained_path
         self.action_dim = action_dim
+        self.value_function_dim = value_function_dim
         self.num_registers = num_registers
         self.max_state_dim = max_state_dim
         self.max_num_embodiments = max_num_embodiments
         self.hidden_size = hidden_size
         self.num_action_per_block = num_action_per_block
         self.num_state_per_block = num_state_per_block
+        self.num_value_function_per_block = num_value_function_per_block
 
         max_num_embodiments = 1
 
@@ -1341,7 +1527,19 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             hidden_dim=self.hidden_size,
             output_dim=action_dim,
         )
-
+        self.value_function_encoder = CategorySpecificMLP(
+            num_categories=max_num_embodiments,
+            input_dim=value_function_dim,
+            hidden_dim=self.hidden_size,
+            output_dim=self.dim,
+        )
+        self.value_function_decoder = CategorySpecificMLP(
+            num_categories=max_num_embodiments,
+            input_dim=dim,
+            hidden_dim=self.hidden_size,
+            output_dim=value_function_dim,
+        )
+        
         # embeddings
         self.patch_embedding = nn.Conv3d(
             in_dim, dim, kernel_size=patch_size, stride=patch_size)
@@ -1359,7 +1557,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.blocks = nn.ModuleList([
             CausalWanAttentionBlock(cross_attn_type, dim, ffn_dim, num_heads, frame_seqlen,
                                     self.local_attn_size, sink_size, num_frame_per_block, qk_norm, cross_attn_norm, eps,
-                                    num_action_per_block, num_state_per_block)
+                                    num_action_per_block, num_state_per_block, num_value_function_per_block)
             for _ in range(num_layers)
         ])
 
@@ -1372,6 +1570,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         
         self.freqs_action = rope_params(1024*10, d)
         self.freqs_state = rope_params(1024, d)
+        self.freqs_value_function = rope_params(1024, d)
         self.freqs = [
             rope_params(1024, d - 4 * (d // 6)),
             rope_params(1024, 2 * (d // 6)),
@@ -1393,7 +1592,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
     @staticmethod
     def _prepare_blockwise_causal_attn_mask(
         device: torch.device | str, num_frames: int = 21,
-        frame_seqlen: int = 1560, num_frame_per_block=1, local_attn_size=-1, action_horizon=1, state_horizon=1, num_action_per_block=30, num_state_per_block=1
+        frame_seqlen: int = 1560, num_frame_per_block=1, local_attn_size=-1, action_horizon=1, state_horizon=1, value_function_horizon=1, num_action_per_block=30, num_state_per_block=1, num_value_function_per_block=1
     ) -> BlockMask:
         """
         We will divide the token sequence into the following format:
@@ -1409,26 +1608,31 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         - num_image_blocks = (num_frames - 1) // num_frame_per_block
         - num_action_blocks = action_horizon // num_action_per_block  
         - num_state_blocks = state_horizon // num_state_per_block
-        - num_image_blocks = num_action_blocks + 1 = num_state_blocks + 1
+        - num_value_function_blocks = value_function_horizon // num_value_function_per_block
+        - num_image_blocks = num_action_blocks + 1 = num_state_blocks + 1 = num_value_function_blocks + 1
         """
         # Calculate block structure
         num_image_blocks = (num_frames - 1) // num_frame_per_block
         num_action_blocks = action_horizon // num_action_per_block
         num_state_blocks = state_horizon // num_state_per_block
-        
-        # Verify the relationship: num_image_blocks = num_action_blocks + 1 = num_state_blocks + 1
+        num_value_function_blocks = value_function_horizon // num_value_function_per_block
+
+        # Verify the relationship: num_image_blocks = num_action_blocks + 1 = num_state_blocks + 1 = num_value_function_blocks + 1
         assert num_image_blocks == num_action_blocks, \
             f"image_blocks mismatch: {num_image_blocks} != {num_action_blocks}"
         assert num_image_blocks == num_state_blocks, \
             f"image_blocks mismatch: {num_image_blocks} != {num_state_blocks}"
-        
+        assert num_image_blocks == num_value_function_blocks, \
+            f"image_blocks mismatch: {num_image_blocks} != {num_value_function_blocks}"
+
         # Token ranges
         first_image_len = frame_seqlen  # First image (conditioning)
         image_blocks_len = num_image_blocks * num_frame_per_block * frame_seqlen
         action_len = action_horizon
         state_len = state_horizon
-        total_length = first_image_len + image_blocks_len + action_len + state_len
-        
+        value_function_len = value_function_horizon
+        total_length = first_image_len + image_blocks_len + action_len + state_len + value_function_len
+
         # print("total_length", total_length, first_image_len, image_blocks_len, action_len, state_len)
         # Padding to multiple of 128
         # padded_length = math.ceil(total_length / 128) * 128 - total_length
@@ -1445,7 +1649,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         action_end = action_start + action_len
         state_start = action_end
         state_end = state_start + state_len
+        value_function_start = state_end
+        value_function_end = value_function_start + value_function_len
         
+
         # Precompute block indices for each token
         block_indices = torch.zeros(total_padded_length, device=device, dtype=torch.long)
         
@@ -1470,6 +1677,12 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             end_idx = state_start + (block_idx + 1) * num_state_per_block
             block_indices[start_idx:end_idx] = block_idx
         
+        # Assign block indices for value function tokens (0 to num_value_function_blocks-1)
+        for block_idx in range(num_value_function_blocks):
+            start_idx = value_function_start + block_idx * num_value_function_per_block
+            end_idx = value_function_start + (block_idx + 1) * num_value_function_per_block
+            block_indices[start_idx:end_idx] = block_idx
+        
         # Padding tokens get block index of last block + 1 (won't attend to anything)
         block_indices[total_length:] = num_image_blocks
         
@@ -1482,11 +1695,13 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             q_is_image_block = (q_idx >= image_blocks_start) & (q_idx < image_blocks_end)
             q_is_action = (q_idx >= action_start) & (q_idx < action_end)
             q_is_state = (q_idx >= state_start) & (q_idx < state_end)
+            q_is_value_function = (q_idx >= value_function_start) & (q_idx < value_function_end)
             
             kv_is_first_image = (kv_idx >= first_image_start) & (kv_idx < first_image_end)
             kv_is_image_block = (kv_idx >= image_blocks_start) & (kv_idx < image_blocks_end)
             kv_is_action = (kv_idx >= action_start) & (kv_idx < action_end)
             kv_is_state = (kv_idx >= state_start) & (kv_idx < state_end)
+            kv_is_value_function = (kv_idx >= value_function_start) & (kv_idx < value_function_end)
             
             q_block = block_indices[q_idx]
             kv_block = block_indices[kv_idx]
@@ -1499,22 +1714,32 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             image_to_image = q_is_image_block & kv_is_image_block & (kv_block <= q_block)  # Image block to image block: can attend to current and previous image blocks
             image_to_action = q_is_image_block & kv_is_action & (kv_block == q_block)  # Image block to action: can attend to current action block
             image_to_state = q_is_image_block & kv_is_state & (kv_block == q_block)  # Image block to state: can attend to current state block
-            
-            image_block_mask = image_to_first | image_to_image | image_to_action | image_to_state
+            image_to_value_function = q_is_image_block & kv_is_value_function & (kv_block == q_block)  # Image block to value function: can attend to current value function block
+            image_block_mask = image_to_first | image_to_image | image_to_action | image_to_state | image_to_value_function
             
             # Action query
             action_to_image = q_is_action & kv_is_image_block & (kv_block <= q_block)  # Action to image block: can attend to current and all previous image blocks
             action_to_action = q_is_action & kv_is_action & (kv_block == q_block)  # Action to action: only same block
             action_to_state = q_is_action & kv_is_state & (kv_block == q_block)  # Action to state: only same block
+            action_to_value_function = q_is_action & kv_is_value_function & (kv_block == q_block)  # Action to value function: can attend to current value function block
             action_to_first = q_is_action & kv_is_first_image  # Action to first image: always allowed
-            
-            action_mask = action_to_image | action_to_action | action_to_state | action_to_first
-            
+
+            action_mask = action_to_image | action_to_action | action_to_state | action_to_value_function | action_to_first
+
             # State query (conditioning) - cannot attend to anything
             state_mask = q_is_state & False
             
+            # Value function query
+            value_function_to_image = q_is_value_function & kv_is_image_block & (kv_block <= q_block)  # Value function to image block: can attend to current and all previous image blocks
+            value_function_to_action = q_is_value_function & kv_is_action & (kv_block == q_block)  # Value function to action: can attend to current action block
+            value_function_to_state = q_is_value_function & kv_is_state & (kv_block == q_block)  # Value function to state: can attend to current state block
+            value_function_to_value_function = q_is_value_function & kv_is_value_function & (kv_block == q_block)  # Value function to value function: can attend to current value function block
+            value_function_to_first = q_is_value_function & kv_is_first_image  # Value function to first image: always allowed
+            value_function_mask = value_function_to_image | value_function_to_action | value_function_to_state | value_function_to_value_function | value_function_to_first
+            
+            
             # Combine all masks
-            return self_attn | first_image_mask | image_block_mask | action_mask | state_mask
+            return self_attn | first_image_mask | image_block_mask | action_mask | state_mask | value_function_mask
         
         block_mask = create_block_mask(
             attention_mask, B=None, H=None, 
@@ -1529,6 +1754,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             print(f"  num_image_blocks={num_image_blocks} (blocks of {num_frame_per_block * frame_seqlen})")
             print(f"  num_action_blocks={num_action_blocks} (blocks of {num_action_per_block})")
             print(f"  num_state_blocks={num_state_blocks} (blocks of {num_state_per_block})")
+            print(f"  num_value_function_blocks={num_value_function_blocks} (blocks of {num_value_function_per_block})")
             print(f"  total_length={total_length}, padded_length={padded_length}")
             print(block_mask)
 
@@ -1700,9 +1926,11 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         action: torch.Tensor | None,
         timestep_action: torch.Tensor | None,
         state: torch.Tensor | None,
+        value_function: torch.Tensor | None,
+        timestep_value_function: torch.Tensor | None,
         kv_cache: list[torch.Tensor],
         current_start_frame: int,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, list[torch.Tensor]]:
         r"""
         Forward pass through the diffusion model blocks.
         """
@@ -1715,16 +1943,29 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             embodiment_id = torch.tensor([0], device=x.device).repeat(x.shape[0])
             action_features = self.action_encoder(action, timestep_action, embodiment_id)
             state_features = self.state_encoder(state, embodiment_id)
-            action_register = torch.cat([action_features, state_features], dim=1)
+            value_function_features = None
+            register_parts = [action_features, state_features]
+            if value_function is not None:
+                value_function_features = self.value_function_encoder(value_function, embodiment_id)
+                register_parts.append(value_function_features)
+            action_register = torch.cat(register_parts, dim=1)
             action_length = action_features.shape[1]
+            state_length = state_features.shape[1]
+            value_function_length = value_function_features.shape[1] if value_function_features is not None else 0
             action_register_length = action_register.shape[1]
             x = torch.cat([x, action_register], dim=1)
         else:
             action_features = None
             state_features = None
+            value_function_features = None
             action_length = 0
+            state_length = 0
+            value_function_length = 0
             action_register_length = None
+            if value_function is not None:
+                raise ValueError("value_function requires action/state register context")
 
+        
         # time embeddings
         timestep = timestep.unsqueeze(-1).expand(B, F, seq_len // F).reshape(B, -1)
 
@@ -1734,6 +1975,13 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             stride = timestep_action.shape[1] // state_features.shape[1]
             timestep_state = timestep_action[:, ::stride]
             timestep = torch.cat([timestep, timestep_action, timestep_state], dim=1)
+
+        if value_function is not None:
+            assert timestep_value_function is not None
+            assert value_function_features is not None
+            stride = timestep_value_function.shape[1] // value_function_features.shape[1]
+            timestep_value_function = timestep_value_function[:, ::stride]
+            timestep = torch.cat([timestep, timestep_value_function], dim=1)
 
         e = self.time_embedding(
             sinusoidal_embedding_1d(self.freq_dim, timestep.flatten()).type_as(x))
@@ -1756,6 +2004,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 freqs=freqs,
                 freqs_action=self.freqs_action,
                 freqs_state=self.freqs_state,
+                freqs_value_function=self.freqs_value_function,
                 context=context,
                 action_register_length=action_register_length,
                 kv_cache=kv_cache[block_index],
@@ -1769,6 +2018,13 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         else:
             action_noise_pred = None
 
+        if value_function is not None:
+            value_function_start = seq_len + action_length + state_length
+            value_function_noise_pred = x[:, value_function_start: value_function_start + value_function_length]
+            value_function_noise_pred = self.value_function_decoder(value_function_noise_pred, embodiment_id)
+        else:
+            value_function_noise_pred = None
+        
         # Build a tensor that contains only video tokens per sample with length = max(video_lens)
         x_video = x[:, :seq_len]
         e_video = e[:, :seq_len]
@@ -1776,7 +2032,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         # Unpatchify video-only tokens
         x_video = self.head(x_video, e_video.unsqueeze(2))
 
-        return x_video, action_noise_pred, updated_kv_caches
+        return x_video, action_noise_pred, value_function_noise_pred, updated_kv_caches
 
 
     def _forward_inference_trt(
@@ -1790,7 +2046,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         action,
         timestep_action,
         state,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        value_function,
+        timestep_value_function,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
 
 
         frame_seqlen = 880
@@ -1802,7 +2060,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         for block_index in range(len(self.blocks)):
             kv_cache_list.append(kv_cache_packed[block_index])
         
-        x_video, action_noise_pred, _ = self._forward_inference(
+        x_video, action_noise_pred, value_function_noise_pred, _ = self._forward_inference(
             x=x,
             timestep=timestep,
             context=context,
@@ -1814,10 +2072,12 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             action=action,
             timestep_action=timestep_action,
             state=state,
+            value_function=value_function,
+            timestep_value_function=timestep_value_function,
             current_start_frame = current_start_frame,
         ) 
 
-        return x_video, action_noise_pred
+        return x_video, action_noise_pred, value_function_noise_pred
 
     def _forward_inference_trt_droid(
         self,
@@ -1830,7 +2090,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         action,
         timestep_action,
         state,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        value_function,
+        timestep_value_function,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
 
 
         frame_seqlen = 880
@@ -1842,7 +2104,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         for block_index in range(len(self.blocks)):
             kv_cache_list.append(kv_cache_packed[block_index])
         
-        x_video, action_noise_pred, _ = self._forward_inference(
+        x_video, action_noise_pred, value_function_noise_pred, _ = self._forward_inference(
             x=x,
             timestep=timestep,
             context=context,
@@ -1854,10 +2116,12 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             action=action,
             timestep_action=timestep_action,
             state=state,
+            value_function=value_function,
+            timestep_value_function=timestep_value_function,
             current_start_frame = current_start_frame,
         ) 
 
-        return x_video, action_noise_pred
+        return x_video, action_noise_pred, value_function_noise_pred
 
 
     def _forward_inference(
@@ -1874,8 +2138,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         action=None,
         timestep_action=None,
         state=None,
+        value_function=None,
+        timestep_value_function=None,
         embodiment_id=None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, list[torch.Tensor]]:
         r"""
         Run the diffusion model with kv caching.
         See Algorithm 2 of CausVid paper https://arxiv.org/abs/2412.07772 for details.
@@ -1923,7 +2189,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             start_frame=current_start_frame,
         )
 
-        x_video, action_noise_pred, updated_kv_caches = self._forward_blocks(
+        x_video, action_noise_pred, value_function_noise_pred, updated_kv_caches = self._forward_blocks(
             x=x,
             seq_len=seq_len,
             freqs=freqs,
@@ -1934,6 +2200,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             action=action,
             timestep_action=timestep_action,
             state=state,
+            value_function=value_function,
+            timestep_value_function=timestep_value_function,
             kv_cache=kv_cache,
             current_start_frame=current_start_frame,
         )
@@ -1942,18 +2210,21 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         x_video = x_video.clone()
         if action_noise_pred is not None:
             action_noise_pred = action_noise_pred.clone()
+        if value_function_noise_pred is not None:
+            value_function_noise_pred = value_function_noise_pred.clone()
         #for block_index, updated_kv_cache in enumerate(updated_kv_caches):
         #    kv_cache[block_index] = updated_kv_cache.clone()
 
         video_noise_pred = self.unpatchify(x_video, grid_size)
 
-        return video_noise_pred, action_noise_pred, updated_kv_caches
+        return video_noise_pred, action_noise_pred, value_function_noise_pred, updated_kv_caches
 
     def _forward_train(
         self,
         x,
         timestep,
         timestep_action,
+        timestep_value_function,
         context,
         seq_len,
         clean_x=None,
@@ -1962,6 +2233,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         clip_feature=None,
         action=None,
         state=None,
+        value_function=None,
         embodiment_id=None,
     ):
         r"""
@@ -2012,15 +2284,28 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             action_features = self.action_encoder(action, timestep_action, embodiment_id)
             action_length = action_features.shape[1]
             state_features = self.state_encoder(state, embodiment_id)
-            action_register = torch.cat([action_features, state_features], dim=1)
+            value_function_features = None
+            register_parts = [action_features, state_features]
+            if value_function is not None:
+                assert timestep_value_function is not None
+                value_function_features = self.value_function_encoder(value_function, embodiment_id)
+                register_parts.append(value_function_features)
+            action_register = torch.cat(register_parts, dim=1)
             action_register_length = action_register.shape[1]
+            state_length = state_features.shape[1]
+            value_function_length = value_function_features.shape[1] if value_function_features is not None else 0
             x = torch.cat([x, action_register], dim=1)
         else:
             action_features = None
             action_length = None
             state_features = None
+            value_function_features = None
+            state_length = 0
+            value_function_length = 0
             action_register = None
             action_register_length = None
+            if value_function is not None:
+                raise ValueError("value_function requires action/state register context")
 
         # time embeddings
         timestep = timestep.unsqueeze(-1).expand(B, F, seq_len // F).reshape(B, -1)
@@ -2032,6 +2317,12 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             stride = timestep_action.shape[1] // state_features.shape[1]
             timestep_state = timestep_action[:, ::stride]
             timestep = torch.cat([timestep, timestep_action, timestep_state], dim=1)
+            if value_function is not None:
+                assert timestep_value_function is not None
+                assert value_function_features is not None
+                vf_stride = timestep_value_function.shape[1] // value_function_features.shape[1]
+                timestep_value = timestep_value_function[:, ::vf_stride]
+                timestep = torch.cat([timestep, timestep_value], dim=1)
 
         e = self.time_embedding(
             sinusoidal_embedding_1d(self.freq_dim, timestep.flatten()).type_as(x))
@@ -2073,6 +2364,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             freqs=freqs,
             freqs_action=self.freqs_action,
             freqs_state=self.freqs_state,
+            freqs_value_function=self.freqs_value_function,
             action_register_length=action_register_length,
             context=context,
             is_tf=clean_x is not None,
@@ -2104,6 +2396,13 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         else:
             action_noise_pred = None
 
+        if value_function is not None:
+            value_function_start = seq_len + action_length + state_length
+            value_function_noise_pred = x[:, value_function_start:value_function_start + value_function_length]
+            value_function_noise_pred = self.value_function_decoder(value_function_noise_pred, embodiment_id)
+        else:
+            value_function_noise_pred = None
+
         # Build a tensor that contains only video tokens per sample with length = max(video_lens)
         x_video = x[:, :seq_len]
         e_video = e[:, :seq_len]
@@ -2112,7 +2411,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         x_video = self.head(x_video, e_video.unsqueeze(2))
         video_noise_pred = self.unpatchify(x_video, grid_size)
 
-        return video_noise_pred, action_noise_pred
+        return video_noise_pred, action_noise_pred, value_function_noise_pred
 
     def forward(
         self,
@@ -2160,6 +2459,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             self.freqs_action = self.freqs_action.to(device)
         if self.freqs_state.device != device:
             self.freqs_state = self.freqs_state.to(device)
+        if self.freqs_value_function.device != device:
+            self.freqs_value_function = self.freqs_value_function.to(device)
 
         f, h, w = grid_size.tolist()
         freqs = torch.cat(
