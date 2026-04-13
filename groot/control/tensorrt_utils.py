@@ -579,10 +579,18 @@ class WanTrtModel5B(torch.nn.Module):
             state=state.to(torch.float16),
             embodiment_id=embodiment_id.to(torch.int32),
         )
+        if isinstance(output, list):
+            output = {f"out.{i}": tensor for i, tensor in enumerate(output)}
         if "out.0" in output: # for nvfp4 model export through modelopt
-            return output["out.0"].to(torch.bfloat16).contiguous(), output["out.1"].to(torch.bfloat16).contiguous()
+            video_noise_pred = output["out.0"].to(torch.bfloat16).contiguous()
+            action_noise_pred = output["out.1"].to(torch.bfloat16).contiguous()
+            value_function_noise_pred = output["out.2"].to(torch.bfloat16).contiguous()
+            return video_noise_pred, action_noise_pred, value_function_noise_pred
         else:
-            return output["video_noise_pred"].to(torch.bfloat16).contiguous(), output["action_noise_pred"].to(torch.bfloat16).contiguous()
+            video_noise_pred = output["video_noise_pred"].to(torch.bfloat16).contiguous()
+            action_noise_pred = output["action_noise_pred"].to(torch.bfloat16).contiguous()
+            value_function_noise_pred = output["value_function_noise_pred"].to(torch.bfloat16).contiguous()
+            return video_noise_pred, action_noise_pred, value_function_noise_pred
 
 
 class WanTrtModel14B(torch.nn.Module):
@@ -619,10 +627,18 @@ class WanTrtModel14B(torch.nn.Module):
             clip_feature=clip_feature.to(torch.float16),
             y=y.to(torch.float16),
         )
+        if isinstance(output, list):
+            output = {f"out.{i}": tensor for i, tensor in enumerate(output)}
         if "out.0" in output: # for nvfp4 model export through modelopt
-            return output["out.0"].to(torch.bfloat16).contiguous(), output["out.1"].to(torch.bfloat16).contiguous()
+            video_noise_pred = output["out.0"].to(torch.bfloat16).contiguous()
+            action_noise_pred = output["out.1"].to(torch.bfloat16).contiguous()
+            value_function_noise_pred = output["out.2"].to(torch.bfloat16).contiguous()
+            return video_noise_pred, action_noise_pred, value_function_noise_pred
         else:
-            return output["video_noise_pred"].to(torch.bfloat16).contiguous(), output["action_noise_pred"].to(torch.bfloat16).contiguous()
+            video_noise_pred = output["video_noise_pred"].to(torch.bfloat16).contiguous()
+            action_noise_pred = output["action_noise_pred"].to(torch.bfloat16).contiguous()
+            value_function_noise_pred = output["value_function_noise_pred"].to(torch.bfloat16).contiguous()
+            return video_noise_pred, action_noise_pred, value_function_noise_pred
 
 
 class WanTrtModelAr5B(torch.nn.Module):
@@ -665,11 +681,19 @@ class WanTrtModelAr5B(torch.nn.Module):
             timestep_action.to(torch.float16),
             state.to(torch.float16),
         )
+        if isinstance(output, list):
+            output = {f"out.{i}": tensor for i, tensor in enumerate(output)}
 
         if "out.0" in output: # for nvfp4 model export through modelopt
-            return output["out.0"].to(torch.bfloat16).contiguous(), output["out.1"].to(torch.bfloat16).contiguous()
+            video_noise_pred = output["out.0"].to(torch.bfloat16).contiguous()
+            action_noise_pred = output["out.1"].to(torch.bfloat16).contiguous()
+            value_function_noise_pred = output["out.2"].to(torch.bfloat16).contiguous()
+            return video_noise_pred, action_noise_pred, value_function_noise_pred
         else:
-            return output["video_noise_pred"].to(torch.bfloat16).contiguous(), output["action_noise_pred"].to(torch.bfloat16).contiguous()
+            video_noise_pred = output["video_noise_pred"].to(torch.bfloat16).contiguous()
+            action_noise_pred = output["action_noise_pred"].to(torch.bfloat16).contiguous()
+            value_function_noise_pred = output["value_function_noise_pred"].to(torch.bfloat16).contiguous()
+            return video_noise_pred, action_noise_pred, value_function_noise_pred
 
 
 class WanTrtModelAr14B(torch.nn.Module):
@@ -714,11 +738,19 @@ class WanTrtModelAr14B(torch.nn.Module):
             timestep_action.to(torch.float16),
             state.to(torch.float16),
         )
+        if isinstance(output, list):
+            output = {f"out.{i}": tensor for i, tensor in enumerate(output)}
 
         if "out.0" in output: # for nvfp4 model export through modelopt
-            return output["out.0"].to(torch.bfloat16).contiguous(), output["out.1"].to(torch.bfloat16).contiguous()
+            video_noise_pred = output["out.0"].to(torch.bfloat16).contiguous()
+            action_noise_pred = output["out.1"].to(torch.bfloat16).contiguous()
+            value_function_noise_pred = output["out.2"].to(torch.bfloat16).contiguous()
+            return video_noise_pred, action_noise_pred, value_function_noise_pred
         else:
-            return output["video_noise_pred"].to(torch.bfloat16).contiguous(), output["action_noise_pred"].to(torch.bfloat16).contiguous()
+            video_noise_pred = output["video_noise_pred"].to(torch.bfloat16).contiguous()
+            action_noise_pred = output["action_noise_pred"].to(torch.bfloat16).contiguous()
+            value_function_noise_pred = output["value_function_noise_pred"].to(torch.bfloat16).contiguous()
+            return video_noise_pred, action_noise_pred, value_function_noise_pred
 
 def load_tensorrt_engine(engine_path="tensorrt/wan_model.trt", model_type="5B"):
     """Load TensorRT engine"""

@@ -119,6 +119,11 @@ modality_config_oxe_droid:
       - annotation.language.language_instruction
       - annotation.language.language_instruction_2
       - annotation.language.language_instruction_3
+  rl_info:
+    _target_: groot.vla.data.dataset.ModalityConfig
+    delta_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+    modality_keys:
+      - value_function
   lapa_action:
     _target_: groot.vla.data.dataset.ModalityConfig
     delta_indices: [0]
@@ -207,6 +212,11 @@ modality_config_agibot:
     delta_indices: [0]
     modality_keys:
       - annotation.language.action_text
+  rl_info:
+    _target_: groot.vla.data.dataset.ModalityConfig
+    delta_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+    modality_keys:
+      - value_function
 
 transform_agibot:
   _target_: groot.vla.data.transform.ComposedModalityTransform
@@ -294,6 +304,11 @@ modality_config_yam:
     delta_indices: [0]
     modality_keys:
       - annotation.task
+  rl_info:
+    _target_: groot.vla.data.dataset.ModalityConfig
+    delta_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+    modality_keys:
+      - value_function
 
 transform_yam:
   _target_: groot.vla.data.transform.ComposedModalityTransform

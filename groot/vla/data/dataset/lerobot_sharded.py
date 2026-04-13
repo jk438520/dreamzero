@@ -315,6 +315,13 @@ class ShardedLeRobotSingleDataset(LeRobotSingleDataset):
             assert np.array_equal(
                 indices, expected_indices
             ), f"[{self}] Index sequence mismatch in trajectory data, {trajectory_id=}"
+        assert "value_function" in traj_data.columns, (
+            f"Missing required 'value_function' column for trajectory {trajectory_id}. "
+            f"Available columns: {list(traj_data.columns)}"
+        )
+        assert traj_data["value_function"].notna().all(), (
+            f"Found null values in required 'value_function' column for trajectory {trajectory_id}"
+        )
         return traj_data
 
 
@@ -925,104 +932,10 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
         state_or_action_cfg = getattr(self.metadata.modalities, modality)[subkey]
 
 
-        # Build sampled indices for action aligned with language and video sampling
-        # Action runs at 30fps, so for each ±30-frame step around first_idx,
-        # collect a 30-length chunk with stride 1: [anchor ... anchor+29].
-        # Stop on language change at the step anchor, bounds, or when reaching 480 frames (16 chunks * 30).
-        trajectory_index = self.get_trajectory_index(trajectory_id)
-        trajectory_length = self.trajectory_lengths[trajectory_index]
-        # traj_data = (
-        #     self.curr_traj_data
-        #     if getattr(self, "curr_traj_data", None) is not None
-        #     else self.get_trajectory_data(trajectory_id)
-        # )
-        # language_key = self.language_key
-        traj_data = self.get_trajectory_data(trajectory_id)
-        language_key = None
-        for modality_name in self.modality_keys:
-            for modality_key in self.modality_keys[modality_name]:
-                if modality_key.startswith("annotation."):
-                    subkey = modality_key.replace("annotation.", "")
-                    annotation_meta = self.lerobot_modality_meta.annotation
-                    subkey_meta = annotation_meta[subkey]
-                    language_key = subkey_meta.original_key
-                    break
-        if language_key is not None and language_key in traj_data.columns and len(step_indices) > 0:
-            language_annotations = traj_data[language_key].values
-            first_idx = max(0, min(int(step_indices[0]), trajectory_length - 1))
-            target_language = language_annotations[first_idx]
-            
-            # Get the number of chunks from video sampling to ensure alignment
-            target_num_chunks = None
-            # if first_idx in self._current_num_chunks:
-            if hasattr(self, '_current_num_chunks') and first_idx in self._current_num_chunks:
-                target_num_chunks = self._current_num_chunks[first_idx]
-                # print(f"Using target_num_chunks from video: {target_num_chunks}")
-            
-            max_frames = 24 * self.max_chunk_size
-            per_step_offsets = list(range(24))  # 0..23
-            sampled_list: list[int] = []
+        # Build sampled indices for action aligned with language/video sampling.
+        # This keeps action chunks synchronized with the chunk count selected by video.
+        sampled_indices, trajectory_length = self._get_action_aligned_indices(trajectory_id, step_indices)
 
-            def add_step_set(anchor_index: int) -> None:
-                nonlocal sampled_list
-                # Ensure the whole 32-length chunk fits within bounds
-                if anchor_index < 0 or anchor_index + 24 >= trajectory_length:
-                    return
-                # Ensure we don't overrun the max_frames cap with a partial chunk
-                if len(sampled_list) + 24 > max_frames:
-                    return
-                # If we have a target number of chunks, stop when we reach it
-                if target_num_chunks is not None and len(sampled_list) // 24 >= target_num_chunks:
-                    return
-                for offset in per_step_offsets:
-                    idx = anchor_index + offset
-                    sampled_list.append(int(idx))
-
-            # Always include first_idx chunk
-            add_step_set(first_idx)
-
-                # Expand outward in 32-frame steps
-            step = 1
-            back_done = False
-            fwd_done = False
-            while len(sampled_list) < max_frames and (not back_done or not fwd_done):
-                # Stop if we've reached the target number of chunks
-                if target_num_chunks is not None and len(sampled_list) // 24 >= target_num_chunks:
-                    break
-                    
-                if not back_done:
-                    back_anchor = first_idx - 24 * step
-                    if back_anchor < 0:
-                        back_done = True
-                    elif language_annotations[back_anchor] != target_language:
-                        back_done = True
-                    else:
-                        add_step_set(back_anchor)
-                if len(sampled_list) >= max_frames:
-                    break
-                if not fwd_done:
-                    fwd_anchor = first_idx + 24 * step
-                    if fwd_anchor >= trajectory_length:
-                        fwd_done = True
-                    elif language_annotations[fwd_anchor] != target_language:
-                        fwd_done = True
-                    else:
-                        add_step_set(fwd_anchor)
-                step += 1
-
-            if len(sampled_list) > 0:
-                unique_sorted = np.array(sorted(set(sampled_list)), dtype=int)
-                # Enforce divisibility by 30 and the 480 cap
-                capped_size = min(unique_sorted.size, max_frames)
-                divisible_size = (capped_size // 24) * 24
-                sampled_indices = unique_sorted[:divisible_size]
-            else:
-                sampled_indices = np.array([], dtype=int)
-        else:
-            # Fallback: use provided indices with bounds
-            sampled_indices = np.maximum(step_indices, 0)
-            sampled_indices = np.minimum(sampled_indices, trajectory_length - 1)
-        
         # print("sampled indices for action", first_idx, sampled_indices, trajectory_length)
 
         # Pad the data using the computed sampled indices
@@ -1033,8 +946,8 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
             padding_strategy="first_last" if state_or_action_cfg.absolute else "zero",
         )
         # print("action data before convert", key)
-        # Calculate relative action on the fly if relative_action is enabled
-        # Only apply to keys that are in relative_action_keys
+        # Calculate relative action on the fly if relative_action is enabled.
+        # Only apply to keys included in relative_action_keys when specified.
         subkey = key.replace("action.", "")
         should_convert_to_relative = (
             (self.relative_action or self.relative_action_per_horizon)  
@@ -1053,6 +966,142 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
             # print("action data after convert", action_data[0], action_data[-1], key)
         
         return action_data
+
+    def _get_action_aligned_indices(
+        self,
+        trajectory_id: int,
+        step_indices: np.ndarray,
+    ) -> tuple[np.ndarray, int]:
+        """Build chunk-expanded indices aligned with action sampling logic."""
+        # Action runs at full-rate steps. For each accepted anchor step, expand
+        # to a contiguous 24-step chunk: [anchor, anchor+1, ..., anchor+23].
+        # Anchors expand in +/-24-step hops around first_idx, while enforcing:
+        # 1) language consistency at anchor steps,
+        # 2) trajectory bounds,
+        # 3) max chunk budget, and
+        # 4) optional chunk-count alignment with video via _current_num_chunks.
+        trajectory_index = self.get_trajectory_index(trajectory_id)
+        trajectory_length = self.trajectory_lengths[trajectory_index]
+        traj_data = self.get_trajectory_data(trajectory_id)
+
+        language_key = None
+        for modality_name in self.modality_keys:
+            for modality_key in self.modality_keys[modality_name]:
+                if modality_key.startswith("annotation."):
+                    subkey = modality_key.replace("annotation.", "")
+                    annotation_meta = self.lerobot_modality_meta.annotation
+                    subkey_meta = annotation_meta[subkey]
+                    language_key = subkey_meta.original_key
+                    break
+
+        if language_key is not None and language_key in traj_data.columns and len(step_indices) > 0:
+            # Use the first requested step as the anchor language label; then
+            # collect neighboring chunks that remain within the same language span.
+            language_annotations = traj_data[language_key].values
+            first_idx = max(0, min(int(step_indices[0]), trajectory_length - 1))
+            target_language = language_annotations[first_idx]
+            
+            # Get the number of chunks from video sampling to ensure alignment
+            target_num_chunks = None
+            # if first_idx in self._current_num_chunks:
+            if hasattr(self, '_current_num_chunks') and first_idx in self._current_num_chunks:
+                target_num_chunks = self._current_num_chunks[first_idx]
+                # print(f"Using target_num_chunks from video: {target_num_chunks}")
+            
+            max_frames = 24 * self.max_chunk_size
+            per_step_offsets = list(range(24))  # 0..23
+            sampled_list: list[int] = []
+
+            def add_step_set(anchor_index: int) -> None:
+                nonlocal sampled_list
+                # Add a full 24-step chunk only when the entire chunk fits and
+                # capacity/chunk-count constraints are still satisfied.
+                if anchor_index < 0 or anchor_index + 24 >= trajectory_length:
+                    return
+                # Ensure we don't overrun the max_frames cap with a partial chunk
+                if len(sampled_list) + 24 > max_frames:
+                    return
+                # If we have a target number of chunks, stop when we reach it
+                if target_num_chunks is not None and len(sampled_list) // 24 >= target_num_chunks:
+                    return
+                for offset in per_step_offsets:
+                    sampled_list.append(int(anchor_index + offset))
+
+            # Always include first_idx chunk
+            add_step_set(first_idx)
+
+                # Expand outward in 32-frame steps
+            step = 1
+            back_done = False
+            fwd_done = False
+            while len(sampled_list) < max_frames and (not back_done or not fwd_done):
+                # Stop if we've reached the target number of chunks
+                if target_num_chunks is not None and len(sampled_list) // 24 >= target_num_chunks:
+                    break
+                    
+                if not back_done:
+                    back_anchor = first_idx - 24 * step
+                    if back_anchor < 0 or language_annotations[back_anchor] != target_language:
+                        back_done = True
+                    else:
+                        add_step_set(back_anchor)
+
+                if len(sampled_list) >= max_frames:
+                    break
+
+                if not fwd_done:
+                    fwd_anchor = first_idx + 24 * step
+                    if fwd_anchor >= trajectory_length or language_annotations[fwd_anchor] != target_language:
+                        fwd_done = True
+                    else:
+                        add_step_set(fwd_anchor)
+                step += 1
+
+            if len(sampled_list) > 0:
+                unique_sorted = np.array(sorted(set(sampled_list)), dtype=int)
+                # Guarantee chunk-divisible output so downstream chunk reshapes are stable.
+                capped_size = min(unique_sorted.size, max_frames)
+                divisible_size = (capped_size // 24) * 24
+                sampled_indices = unique_sorted[:divisible_size]
+            else:
+                sampled_indices = np.array([], dtype=int)
+        else:
+            # Fallback: no language metadata, just clamp requested indices.
+            sampled_indices = np.maximum(step_indices, 0)
+            sampled_indices = np.minimum(sampled_indices, trajectory_length - 1)
+
+        return sampled_indices, trajectory_length
+
+    def get_rl_info(
+        self,
+        trajectory_id: int,
+        key: str,
+        step_indices: np.ndarray,
+    ) -> np.ndarray:
+        """Get RL info aligned with action chunk expansion (mirrors action behavior)."""
+        assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
+        assert key in self.curr_traj_data.columns, f"No {key} found in {trajectory_id=}"
+
+        data_array: np.ndarray = np.stack(self.curr_traj_data[key])  # type: ignore
+        if data_array.ndim == 1:
+            data_array = data_array.reshape(-1, 1)
+        assert data_array.ndim == 2, f"Expected 2D array, got {data_array.shape} array"
+
+        sampled_indices, trajectory_length = self._get_action_aligned_indices(trajectory_id, step_indices)
+
+        # Rewards are naturally zero-padded outside valid range; other RL fields
+        # use edge padding for temporal continuity.
+        if key == "rl_info.next.reward":
+            padding_strategy = "zero"
+        else:
+            padding_strategy = "first_last"
+
+        return self.retrieve_data_and_pad(
+            array=data_array,
+            step_indices=sampled_indices,
+            max_length=trajectory_length,
+            padding_strategy=padding_strategy,
+        )
     
     def _convert_to_relative_action(
         self,
@@ -1269,6 +1318,13 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
             assert np.array_equal(
                 indices, expected_indices
             ), f"[{self}] Index sequence mismatch in trajectory data, {trajectory_id=}"
+        assert "value_function" in traj_data.columns, (
+            f"Missing required 'value_function' column for trajectory {trajectory_id}. "
+            f"Available columns: {list(traj_data.columns)}"
+        )
+        assert traj_data["value_function"].notna().all(), (
+            f"Found null values in required 'value_function' column for trajectory {trajectory_id}"
+        )
         # Store in cache to avoid repeated filtering on subsequent calls within a batch
         # self._traj_cache[trajectory_id] = traj_data
         return traj_data

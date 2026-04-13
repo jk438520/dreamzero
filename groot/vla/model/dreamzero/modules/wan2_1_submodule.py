@@ -54,7 +54,7 @@ def rope_params_no_polar(max_seq_len: int, dim: int, theta: float = 10000) -> to
     emb = torch.stack((freqs.cos(), freqs.sin()), dim=-1).flatten(-2)
     return emb
 
-def rope_apply(x, grid_sizes, freqs):
+def rope_apply(x, freqs):
     if ENABLE_TENSORRT:
         return rope_apply_no_polar(x, freqs)
     else:
@@ -89,11 +89,11 @@ def rope_apply_no_polar(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
     return x_rotated
 
 
-def rope_action_apply(x, freqs, freqs_action, freqs_state, action_register_length, num_action_per_block=32, num_state_per_block=1):
+def rope_action_apply(x, freqs, freqs_action, freqs_state, freqs_value_function, action_register_length, num_action_per_block=32, num_state_per_block=1, num_value_function_per_block=1):
     if ENABLE_TENSORRT:
-        return rope_action_apply_no_polar(x, freqs, freqs_action, freqs_state, action_register_length, num_action_per_block, num_state_per_block)
+        return rope_action_apply_no_polar(x, freqs, freqs_action, freqs_state, freqs_value_function, action_register_length, num_action_per_block, num_state_per_block, num_value_function_per_block=1)
     else:
-        return rope_action_apply_polar(x, freqs, freqs_action, freqs_state, action_register_length, num_action_per_block, num_state_per_block)
+        return rope_action_apply_polar(x, freqs, freqs_action, freqs_state, freqs_value_function, action_register_length, num_action_per_block, num_state_per_block, num_value_function_per_block)
 
 
 def rope_action_apply_no_polar(
@@ -101,9 +101,11 @@ def rope_action_apply_no_polar(
     freqs: torch.Tensor,
     freqs_action: torch.Tensor,
     freqs_state: torch.Tensor,
+    freqs_value_function: torch.Tensor,
     action_register_length: int,
     num_action_per_block: int = 32,
     num_state_per_block: int = 1,
+    num_value_function_per_block: int = 1,
 ) -> torch.Tensor:
     B, seq_len, n, D = x.shape
 
@@ -111,7 +113,9 @@ def rope_action_apply_no_polar(
         chunk_size = action_register_length // (num_action_per_block + num_state_per_block)
         freqs_1d_action = freqs_action[:chunk_size * num_action_per_block]
         freqs_1d_state = freqs_state[:chunk_size * num_state_per_block]
-        freqs = torch.cat([freqs, freqs_1d_action, freqs_1d_state], dim=0)
+        freqs_1d_value_function = freqs_value_function[:chunk_size * num_value_function_per_block]
+        
+        freqs = torch.cat([freqs, freqs_1d_action, freqs_1d_state, freqs_1d_value_function], dim=0)
 
     # Reshape freqs to be broadcastable: (1, seq_len, 1, D)
     freqs = freqs.unsqueeze(0).unsqueeze(2)
@@ -132,9 +136,11 @@ def rope_action_apply_polar(
     freqs: torch.Tensor,
     freqs_action: torch.Tensor,
     freqs_state: torch.Tensor,
+    freqs_value_function: torch.Tensor,
     action_register_length: int | None,
     num_action_per_block: int | None = None,
     num_state_per_block: int | None = None,
+    num_value_function_per_block: int | None = None,
 ) -> torch.Tensor:
     B, seq_len, n, _ = x.shape
 
@@ -146,12 +152,14 @@ def rope_action_apply_polar(
     if action_register_length is not None:
         assert num_action_per_block is not None
         assert num_state_per_block is not None
+        assert num_value_function_per_block is not None
 
-        chunk_size = action_register_length // (num_action_per_block + num_state_per_block)
+        chunk_size = action_register_length // (num_action_per_block + num_state_per_block + num_value_function_per_block)
 
         freqs_1d_action = freqs_action[:chunk_size * num_action_per_block].view(chunk_size * num_action_per_block, 1, -1)
         freqs_1d_state = freqs_state[:chunk_size * num_state_per_block].view(chunk_size * num_state_per_block, 1, -1)
-        freqs = torch.cat([freqs, freqs_1d_action, freqs_1d_state], dim=0)
+        freqs_1d_value_function = freqs_value_function[:chunk_size * num_value_function_per_block].view(chunk_size * num_value_function_per_block, 1, -1)
+        freqs = torch.cat([freqs, freqs_1d_action, freqs_1d_state, freqs_1d_value_function], dim=0)
 
     # apply rotary embedding
     freqs = freqs.unsqueeze(0)

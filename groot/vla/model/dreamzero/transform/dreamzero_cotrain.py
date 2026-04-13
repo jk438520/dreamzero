@@ -204,6 +204,7 @@ class DreamTransform(InvertibleModalityTransform):
     default_instruction: str
     max_state_dim: int
     max_action_dim: int
+    max_value_function_dim: int = 1
     max_length: int = 512
     embodiment_tag: EmbodimentTag | None = None
     state_horizon: int
@@ -495,6 +496,34 @@ class DreamTransform(InvertibleModalityTransform):
 
         return actions, actions_mask, n_action_tokens
 
+    def _prepare_value_function(self, data: dict):
+        """Prepare value_function to [T, D] and pad to max_value_function_dim."""
+        assert "value_function" in data, (
+            "Missing 'value_function' in transformed sample. "
+            "Ensure dataset modality_configs include the value_function key."
+        )
+
+        value_function = np.asarray(data["value_function"], dtype=np.float32)
+        if value_function.ndim == 1:
+            value_function = value_function[:, None]
+
+        n_value_tokens = value_function.shape[0]
+        n_value_dims = value_function.shape[1]
+
+        assert n_value_dims <= self.max_value_function_dim, (
+            f"value_function dim {n_value_dims} exceeds max allowed {self.max_value_function_dim}."
+        )
+
+        value_function = np.pad(
+            value_function,
+            ((0, 0), (0, self.max_value_function_dim - n_value_dims)),
+            "constant",
+        )
+
+        value_function_mask = np.zeros((n_value_tokens, self.max_value_function_dim), dtype=bool)
+        value_function_mask[:, :n_value_dims] = True
+        return value_function, value_function_mask, n_value_tokens
+
     def apply_single(self, data: dict) -> dict:
         transformed_data = {}
 
@@ -511,7 +540,14 @@ class DreamTransform(InvertibleModalityTransform):
         transformed_data["state_mask"] = state_mask
 
         if self.training:
-            # 3) Prepare actions
+            # 3) Prepare actions and value function
+            actions, actions_mask, _ = self._prepare_action(data)
+            value_function, value_function_mask, _ = self._prepare_value_function(data)
+            transformed_data["action"] = actions
+            transformed_data["action_mask"] = actions_mask
+            transformed_data["value_function"] = value_function
+            transformed_data["value_function_mask"] = value_function_mask
+
             is_detection_instance = self.embodiment_tag == EmbodimentTag.GR1_UNIFIED_SEGMENTATION
             if is_detection_instance:
                 transformed_data["segmentation_target"] = data["action"][0, -3:-1]
@@ -521,9 +557,6 @@ class DreamTransform(InvertibleModalityTransform):
                 transformed_data["segmentation_target"] = np.zeros((2,))
                 transformed_data["segmentation_target_mask"] = np.zeros((1,))
                 transformed_data["has_real_action"] = np.ones((), dtype=bool)
-            actions, actions_mask, _ = self._prepare_action(data)
-            transformed_data["action"] = actions
-            transformed_data["action_mask"] = actions_mask
 
             # default for lapa instance
             transformed_data["lapa_action"] = np.zeros_like(transformed_data["action"])
@@ -592,6 +625,13 @@ class DreamTransform(InvertibleModalityTransform):
                 transformed_data[key].shape == transformed_data["action"].shape
                 for key in action_and_mask_keys
             ), f"Shape mismatch: {[(key, transformed_data[key].shape) for key in action_and_mask_keys]}"
+            action_t = transformed_data["action"].shape[0]
+            value_t = transformed_data["value_function"].shape[0]
+            assert action_t % value_t == 0, (
+                f"Incompatible action/value_function horizons: "
+                f"action={transformed_data['action'].shape}, value_function={transformed_data['value_function'].shape}. "
+                f"Expected action_t to be divisible by value_t."
+            )
 
         return transformed_data
 
