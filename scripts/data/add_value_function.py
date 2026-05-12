@@ -94,6 +94,10 @@ def process_parquet(path: Path):
 
     # Calculate value function as t/T where t in [0, T-1].
     value_function = (np.arange(num_frames, dtype=np.float64) / float(num_frames)).reshape(-1, 1)
+    
+    # TEMPORARY overwrite with 0
+    value_function = np.zeros_like(value_function)
+    
     value_function = value_function.astype(action_data.dtype, copy=False)
         
     # Append value_function as the last dimension
