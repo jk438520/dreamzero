@@ -7,7 +7,7 @@
 
 # Create new dataset directory
 SOURCE_DIR="./data/droid_lerobot_1_traj"
-DEST_DIR="./data/droid_lerobot_1_traj_with_value_function"
+DEST_DIR="./data/droid_lerobot_1_traj_with_zeros"
 
 python scripts/data/add_value_function.py \
     --dataset-path "$SOURCE_DIR" \
