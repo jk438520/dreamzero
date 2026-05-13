@@ -1,53 +1,9 @@
-
 # @package _global_
 
+# Adds action.value_function as an auxiliary action dimension for DROID.
 defaults:
-  - dreamzero/base_48_wan_fine_aug_relative
-  - _self_ # this file will override the base
-
-max_state_dim: 64
-use_global_metadata: false
-relative_action: true
-relative_action_per_horizon: false
-relative_action_keys:
-  - joint_position
-max_chunk_size: 5
-# Use 10% of data in shards before moving to next shard
-dataset_shard_sampling_rate: 1
-mixture_dataset_cls: groot.vla.data.dataset.lerobot_sharded.ShardedLeRobotMixtureDataset.from_mixture_spec
-single_dataset_cls: groot.vla.data.dataset.lerobot_sharded.ShardedLeRobotSubLangSingleActionChunkDatasetDROID
-
-# Set your DROID dataset path here or override via CLI:
-#   droid_data_root=/path/to/your/droid_dataset
-droid_data_root: ???
-
-train_dataset:
-  _target_: ${mixture_dataset_cls}
-  _convert_: object
-  mixture_spec:
-    - dataset_path:
-        oxe_droid:
-          - ${droid_data_root}
-      dataset_weight: 1.0
-      distribute_weights: true
-
-  dataset_class: ${single_dataset_cls}
-  all_modality_configs: ${modality_configs}
-  all_transforms: ${transforms}
-  metadata_versions: ${metadata_versions}
-  fps: ${fps}
-  dataset_kwargs:
-    video_backend: decord
-    use_global_metadata: ${use_global_metadata}
-    max_chunk_size: ${max_chunk_size}
-    relative_action: ${relative_action}
-    relative_action_keys: ${relative_action_keys}
-    relative_action_per_horizon: ${relative_action_per_horizon}
-  mixture_kwargs:
-    training: true
-    balance_dataset_weights: false
-    seed: 42
-    shard_sampling_rate: ${dataset_shard_sampling_rate}
+  - dreamzero/droid_relative
+  - _self_
 
 modality_config_oxe_droid:
   action:
@@ -55,3 +11,52 @@ modality_config_oxe_droid:
       - action.joint_position
       - action.gripper_position
       - action.value_function
+
+transform_oxe_droid:
+  _target_: groot.vla.data.transform.ComposedModalityTransform
+  transforms:
+    # Video transforms
+    - _target_: groot.vla.data.transform.VideoToTensor
+      apply_to: ${modality_config_oxe_droid.video.modality_keys}
+    - _target_: groot.vla.data.transform.CenterCrop
+      apply_to: ${modality_config_oxe_droid.video.modality_keys}
+      crop_size: ${video_crop_size}
+    - _target_: groot.vla.data.transform.Resize
+      apply_to: ${modality_config_oxe_droid.video.modality_keys}
+      resize_size: ${video_resize_size}
+    - _target_: groot.vla.data.transform.ColorJitter
+      apply_to: ${modality_config_oxe_droid.video.modality_keys}
+      brightness: 0.2
+      contrast: 0.2
+      saturation: 0.2
+      hue: 0.05
+    - _target_: groot.vla.data.transform.VideoToNumpy
+      apply_to: ${modality_config_oxe_droid.video.modality_keys}
+
+    # State transforms
+    - _target_: groot.vla.data.transform.StateActionToTensor
+      apply_to: ${modality_config_oxe_droid.state.modality_keys}
+    - _target_: groot.vla.data.transform.StateActionTransform
+      apply_to: ${modality_config_oxe_droid.state.modality_keys}
+      normalization_modes:
+        state.joint_position: q99
+        state.gripper_position: q99
+
+    # Action transforms
+    - _target_: groot.vla.data.transform.StateActionToTensor
+      apply_to: ${modality_config_oxe_droid.action.modality_keys}
+    - _target_: groot.vla.data.transform.StateActionTransform
+      apply_to: ${modality_config_oxe_droid.action.modality_keys}
+      normalization_modes:
+        action.joint_position: q99
+        action.gripper_position: q99
+        action.value_function: q99
+
+    # ConcatTransform
+    - _target_: groot.vla.data.transform.ConcatTransform
+      video_concat_order: ${modality_config_oxe_droid.video.modality_keys}
+      state_concat_order: ${modality_config_oxe_droid.state.modality_keys}
+      action_concat_order: ${modality_config_oxe_droid.action.modality_keys}
+
+    # Model-specific transform
+    - ${model_specific_transform}

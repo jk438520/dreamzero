@@ -101,7 +101,7 @@ def build_frame_schedule(total_frames: int, num_chunks: int) -> list[list[int]]:
     return chunks
 
 
-def make_observation_from_video(
+def _make_obs_from_video(
     camera_frames: dict[str, np.ndarray],
     frame_indices: list[int],
     prompt: str,
@@ -252,7 +252,7 @@ def test_ar_droid_policy_server(
 
     # Step 0: initial single frame
     logging.info("=== Initial: frame [0] ===")
-    obs = make_observation_from_video(camera_frames, [0], prompt, session_id)
+    obs = _make_obs_from_video(camera_frames, [0], prompt, session_id)
     t0 = time.time()
     actions = client.infer(obs)
     dt = time.time() - t0
@@ -261,7 +261,7 @@ def test_ar_droid_policy_server(
     # Subsequent chunks: send 4 frames at a time
     for chunk_idx, frame_indices in enumerate(chunks):
         logging.info(f"=== Chunk {chunk_idx}: frames {frame_indices} ===")
-        obs = make_observation_from_video(camera_frames, frame_indices, prompt, session_id)
+        obs = _make_obs_from_video(camera_frames, frame_indices, prompt, session_id)
         t0 = time.time()
         actions = client.infer(obs)
         dt = time.time() - t0

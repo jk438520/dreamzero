@@ -124,22 +124,6 @@ class WANPolicyHeadConfig(PretrainedConfig):
     num_timestep_buckets: int = field(
         default=1000, metadata={"help": "Number of timestep discretization buckets."}
     )
-    use_value_reconstruction_loss: bool = field(
-        default=False,
-        metadata={"help": "Add auxiliary reconstruction loss on action.value_function channel."},
-    )
-    value_reconstruction_loss_weight: float = field(
-        default=0.2,
-        metadata={"help": "Weight for auxiliary value reconstruction loss."},
-    )
-    value_reconstruction_index: int = field(
-        default=-1,
-        metadata={"help": "Index of value_function channel in action vector (default: last dim)."},
-    )
-    value_reconstruction_huber_delta: float = field(
-        default=0.05,
-        metadata={"help": "Huber beta parameter for value reconstruction loss."},
-    )
     num_inference_timesteps: int = field(
         default=None,
         metadata={"help": "Number of inference steps for noise diffusion."},
@@ -616,29 +600,6 @@ class WANPolicyHead(ActionHead):
             param.data = param.to(torch.float32)
         return model
 
-    def _resolve_value_reconstruction_index(self, action_mask: torch.Tensor, configured_index: int) -> int:
-        """Resolve the value reconstruction channel against the valid action slice.
-
-        The action tensor can be padded to `max_action_dim`, so a raw `-1` would
-        otherwise point at the padded tail. We always resolve negative indices
-        against the unmasked action dims and reject indices that land on padding.
-        """
-        valid_dims = action_mask.any(dim=(0, 1))
-        valid_indices = torch.where(valid_dims)[0]
-
-        if valid_indices.numel() == 0:
-            raise ValueError("Cannot resolve value reconstruction index: action_mask has no valid dims")
-
-        if configured_index < 0:
-            return int(valid_indices[configured_index].item())
-
-        if configured_index >= valid_dims.numel() or not bool(valid_dims[configured_index].item()):
-            raise ValueError(
-                f"value_reconstruction_index={configured_index} points to a padded or out-of-range action dim"
-            )
-
-        return int(configured_index)
-
     def forward(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
         # Set frozen modules to eval
         self.set_frozen_modules_to_eval_mode()
@@ -836,58 +797,9 @@ class WANPolicyHead(ActionHead):
                     timestep_action.flatten(0, 1),
                 ).unflatten(0, (noise_action.shape[0], noise_action.shape[1])).to(self._device)
                 weighted_action_loss = weight_action.mean()
-
-                value_reconstruction_loss = torch.tensor(0.0, device=self._device)
-                if self.config.use_value_reconstruction_loss:
-                    value_idx = self._resolve_value_reconstruction_index(
-                        action_mask,
-                        self.config.value_reconstruction_index,
-                    )
-
-                    # x_t = x_0 + sigma * (noise - x_0) => x_0 = x_t - sigma * target
-                    # Here action_noise_pred predicts target = noise - x_0.
-                    timestep_action_id_for_sigma = torch.argmin(
-                        (
-                            self.scheduler.timesteps.unsqueeze(1)
-                            - timestep_action.flatten(0, 1).unsqueeze(0).to(self.scheduler.timesteps.device)
-                        ).abs(),
-                        dim=0,
-                    )
-                    sigma_action = self.scheduler.sigmas[timestep_action_id_for_sigma].to(
-                        device=noisy_actions.device,
-                        dtype=noisy_actions.dtype,
-                    ).unflatten(0, (noisy_actions.shape[0], noisy_actions.shape[1]))
-                    while len(sigma_action.shape) < len(noisy_actions.shape):
-                        sigma_action = sigma_action.unsqueeze(-1)
-
-                    action_x0_pred = noisy_actions.float() - sigma_action.float() * action_noise_pred.float()
-
-                    pred_value = action_x0_pred[..., value_idx]
-                    gt_value = actions.float()[..., value_idx]
-                    value_valid_mask = action_mask[..., value_idx].float() * has_real_action[:, None].float()
-
-                    value_recon_per_token = torch.nn.functional.smooth_l1_loss(
-                        pred_value,
-                        gt_value,
-                        beta=self.config.value_reconstruction_huber_delta,
-                        reduction='none',
-                    )
-                    timestep_weight_action = self.scheduler.training_weight(
-                        timestep_action.flatten(0, 1),
-                    ).unflatten(0, (noise_action.shape[0], noise_action.shape[1])).to(self._device)
-
-                    numerator = (value_recon_per_token * value_valid_mask * timestep_weight_action).sum()
-                    denom = value_valid_mask.sum().clamp(min=1.0)
-                    value_reconstruction_loss = numerator / denom
-
-                loss = (
-                    weighted_dynamics_loss
-                    + weighted_action_loss
-                    + self.config.value_reconstruction_loss_weight * value_reconstruction_loss
-                )
+                loss = weighted_dynamics_loss + weighted_action_loss
             else:
                 weighted_action_loss = torch.tensor(0.0, device=self._device)
-                value_reconstruction_loss = torch.tensor(0.0, device=self._device)
                 loss = weighted_dynamics_loss
             # loss = dynamics_loss_per_sample.mean()
 
@@ -896,7 +808,6 @@ class WANPolicyHead(ActionHead):
             "loss": loss,
             "dynamics_loss": weighted_dynamics_loss,
             "action_loss": weighted_action_loss,
-            "value_reconstruction_loss": value_reconstruction_loss,
         }
 
         return BatchFeature(data=output_dict)

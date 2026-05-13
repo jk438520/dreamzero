@@ -274,39 +274,18 @@ def extract_pred_value(response: object) -> np.ndarray:
     )
 
 
-def select_aligned_prediction(pred_values: np.ndarray, align_to: str) -> float:
-    """Select a scalar from predicted horizon values aligned to GT anchor.
-
-    align_to='first' is used for the initial single-frame query.
-    align_to='last' is used for chunked multi-frame queries where GT anchor
-    corresponds to the chunk's last frame.
-    """
-    if pred_values.size == 0:
-        raise ValueError("Empty predicted value array")
-    if align_to == "first":
-        return float(pred_values[0])
-    if align_to == "last":
-        return float(pred_values[-1])
-    raise ValueError(f"Unsupported alignment mode: {align_to}")
-
-
 def save_episode_artifacts(
     episode_dir: Path,
     episode_index: int,
     anchors: np.ndarray,
     gt: np.ndarray,
     pred: np.ndarray,
-) -> tuple[float, float, float]:
+) -> tuple[float, float]:
     episode_dir.mkdir(parents=True, exist_ok=True)
 
     abs_err = np.abs(gt - pred)
     mse = float(np.mean((gt - pred) ** 2))
     mae = float(np.mean(abs_err))
-    if len(gt) > 1 and float(np.std(gt)) > 0.0 and float(np.std(pred)) > 0.0:
-        pearson_r = float(np.corrcoef(gt, pred)[0, 1])
-    else:
-        # Correlation is undefined for constant or too-short sequences.
-        pearson_r = float("nan")
 
     df = pd.DataFrame(
         {
@@ -323,11 +302,7 @@ def save_episode_artifacts(
     plt.figure(figsize=(10, 4))
     plt.plot(anchors, gt, label="Ground Truth", lw=1.5)
     plt.plot(anchors, pred, label="Predicted", lw=1.5)
-    corr_str = "nan" if np.isnan(pearson_r) else f"{pearson_r:.4f}"
-    plt.title(
-        f"Episode {episode_index:06d} Value Function "
-        f"(MSE={mse:.6f}, MAE={mae:.6f}, PearsonR={corr_str})"
-    )
+    plt.title(f"Episode {episode_index:06d} Value Function (MSE={mse:.6f}, MAE={mae:.6f})")
     plt.xlabel("Anchor Frame")
     plt.ylabel("Value Function")
     plt.ylim(-0.05, 1.05)
@@ -337,7 +312,7 @@ def save_episode_artifacts(
     plt.savefig(episode_dir / "value_function_plot.png", dpi=180)
     plt.close()
 
-    return mse, mae, pearson_r
+    return mse, mae
 
 
 def evaluate_episode(
@@ -381,10 +356,8 @@ def evaluate_episode(
     if total_frames == 0:
         raise RuntimeError(f"No video frames for episode {episode_index}")
 
-    chunks = build_frame_schedule(total_frames, max_chunks=max_chunks)
-
     anchors: list[int] = [0]
-    for ids in chunks:
+    for ids in build_frame_schedule(total_frames, max_chunks=max_chunks):
         anchors.append(ids[-1])
 
     session_id = str(uuid.uuid4())
@@ -393,15 +366,13 @@ def evaluate_episode(
     # Initial single-frame call.
     init_obs = build_observation(camera_frames, [0], prompt=prompt, session_id=session_id)
     init_resp = client.infer(init_obs)
-    init_pred_values = extract_pred_value(init_resp)
-    pred_points.append(select_aligned_prediction(init_pred_values, align_to="first"))
+    pred_points.append(float(extract_pred_value(init_resp)[0]))
 
-    # Chunked multi-frame calls. Use last horizon element to align with anchor frame.
-    for frame_ids in chunks:
+    # Chunked multi-frame calls.
+    for frame_ids in build_frame_schedule(total_frames, max_chunks=max_chunks):
         obs = build_observation(camera_frames, frame_ids, prompt=prompt, session_id=session_id)
         resp = client.infer(obs)
-        chunk_pred_values = extract_pred_value(resp)
-        pred_points.append(select_aligned_prediction(chunk_pred_values, align_to="last"))
+        pred_points.append(float(extract_pred_value(resp)[0]))
 
     # End current episode session.
     client.reset({})
@@ -411,14 +382,13 @@ def evaluate_episode(
     pred_arr = np.asarray(pred_points, dtype=np.float64)
 
     ep_dir = output_dir / f"episode_{episode_index:06d}"
-    mse, mae, pearson_r = save_episode_artifacts(ep_dir, episode_index, anchors_arr, gt_arr, pred_arr)
+    mse, mae = save_episode_artifacts(ep_dir, episode_index, anchors_arr, gt_arr, pred_arr)
 
     return {
         "episode_index": episode_index,
         "num_points": int(len(pred_arr)),
         "mse": mse,
         "mae": mae,
-        "pearson_r": pearson_r,
     }
 
 
@@ -521,12 +491,11 @@ def main() -> None:
             )
             summary_rows.append(row)
             log.info(
-                "Episode %06d done: points=%d mse=%.6f mae=%.6f pearson_r=%s",
+                "Episode %06d done: points=%d mse=%.6f mae=%.6f",
                 ep_idx,
                 row["num_points"],
                 row["mse"],
                 row["mae"],
-                "nan" if np.isnan(row["pearson_r"]) else f"{row['pearson_r']:.4f}",
             )
         except Exception as e:
             log.exception("Failed episode %06d: %s", ep_idx, e)
@@ -538,14 +507,11 @@ def main() -> None:
     summary_df.to_csv(output_dir / "summary.csv", index=False)
 
     log.info("Saved summary: %s", output_dir / "summary.csv")
-    valid_corr = summary_df["pearson_r"].dropna()
-    mean_corr = float(valid_corr.mean()) if not valid_corr.empty else float("nan")
     log.info(
-        "Aggregate: episodes=%d mean_mse=%.6f mean_mae=%.6f mean_pearson_r=%s",
+        "Aggregate: episodes=%d mean_mse=%.6f mean_mae=%.6f",
         len(summary_df),
         float(summary_df["mse"].mean()),
         float(summary_df["mae"].mean()),
-        "nan" if np.isnan(mean_corr) else f"{mean_corr:.4f}",
     )
 
 
