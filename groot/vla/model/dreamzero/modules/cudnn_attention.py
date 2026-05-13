@@ -12,30 +12,12 @@ Currently, tensors are made contiguous -- packed th2d, th3d not supported yet.
 """
 
 import math
-import re
 from typing import Any, List, Optional, Tuple, Union
-from importlib.metadata import PackageNotFoundError, version as package_version
 
 import torch
 import transformer_engine
 
-
-def _get_te_version_tuple() -> Tuple[int, int]:
-    # Some transformer_engine builds do not define __version__ at module level.
-    raw_ver = getattr(transformer_engine, "__version__", None)
-    if not raw_ver:
-        try:
-            raw_ver = package_version("transformer-engine")
-        except PackageNotFoundError:
-            raw_ver = "0.0"
-
-    major_minor = [int(x) for x in re.findall(r"\d+", str(raw_ver))[:2]]
-    while len(major_minor) < 2:
-        major_minor.append(0)
-    return major_minor[0], major_minor[1]
-
-
-_TE_VER = _get_te_version_tuple()
+_TE_VER = tuple(int(x) for x in transformer_engine.__version__.split(".")[:2])
 
 
 try:

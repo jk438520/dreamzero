@@ -181,15 +181,12 @@ class ARDroidRoboarenaPolicy:
         AR_droid format:
             - action.joint_position: (N, 7)
             - action.gripper_position: (N,) or (N, 1)
-            - action.value_function: (N,) or (N, 1) [optional]
         
         Roboarena format:
             - action: (N, 8) - 7 joint positions + 1 gripper
-            - action: (N, 9) - 7 joint positions + 1 gripper + 1 value_function (if present)
         """
         joint_action = None
         gripper_action = None
-        value_action = None
         
         # Extract actions from dict
         for key, value in action_dict.items():
@@ -197,8 +194,6 @@ class ARDroidRoboarenaPolicy:
                 joint_action = value
             elif "gripper_position" in key or "gripper" in key:
                 gripper_action = value
-            elif "value_function" in key:
-                value_action = value
         
         if joint_action is None:
             # Fallback: return zeros
@@ -225,34 +220,9 @@ class ARDroidRoboarenaPolicy:
                 gripper_action = gripper_action.reshape(1, 1)
         else:
             gripper_action = np.zeros((N, 1), dtype=np.float32)
-
-        # Handle value_function action (optional)
-        if value_action is not None:
-            if isinstance(value_action, torch.Tensor):
-                value_action = value_action.cpu().numpy()
-            if value_action.ndim == 1:
-                value_action = value_action.reshape(-1, 1)
-            elif value_action.ndim == 0:
-                value_action = value_action.reshape(1, 1)
-            elif value_action.ndim > 2:
-                value_action = value_action.reshape(value_action.shape[0], -1)
-            # Keep only one scalar value channel if shape is unexpectedly wider.
-            if value_action.shape[1] > 1:
-                value_action = value_action[:, :1]
-            if value_action.shape[0] != N:
-                logger.warning(
-                    "value_function length mismatch with joint action (%s vs %s); dropping value channel",
-                    value_action.shape[0],
-                    N,
-                )
-                value_action = None
         
-        # Concatenate base actions and optional value channel.
-        base = np.concatenate([joint_action, gripper_action], axis=-1)
-        if value_action is not None:
-            action = np.concatenate([base, value_action], axis=-1).astype(np.float32)
-        else:
-            action = base.astype(np.float32)
+        # Concatenate: (N, 7) + (N, 1) -> (N, 8)
+        action = np.concatenate([joint_action, gripper_action], axis=-1).astype(np.float32)
         
         return action
     
@@ -771,8 +741,8 @@ def main(args: Args) -> None:
     # Set environment variable for DIT cache.
     os.environ["ENABLE_DIT_CACHE"] = "true" if args.enable_dit_cache else "false"
 
-    # Use Flash Attn backend for attention.
-    os.environ["ATTENTION_BACKEND"] = "FA2"
+    # Use TE cuDNN backend for attention.
+    os.environ["ATTENTION_BACKEND"] = "TE"
 
     # Increase the recompile limit to 100 for inference due
     # to autoregressive nature of the model (several possible shapes).

@@ -16,7 +16,7 @@ try:
         device_name = torch.cuda.get_device_name(0).lower()
         return "h100" in device_name or "hopper" in device_name
     FLASH_ATTN_3_AVAILABLE = is_hopper_gpu()
-except (ModuleNotFoundError, ImportError):
+except ModuleNotFoundError:
     FLASH_ATTN_3_AVAILABLE = False
 
 try:
@@ -29,7 +29,7 @@ try:
     import transformer_engine
     from groot.vla.model.dreamzero.modules.cudnn_attention import DotProductAttention
     TRANSFORMER_ENGINE_AVAILABLE = True
-except (ModuleNotFoundError, ImportError):
+except ModuleNotFoundError:
     TRANSFORMER_ENGINE_AVAILABLE = False
 
 import warnings
