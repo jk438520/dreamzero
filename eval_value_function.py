@@ -36,7 +36,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
 # Matches test_client_AR.py and AR inference schedule.
-RELATIVE_OFFSETS = [-23, -16, -8, 0]
+RELATIVE_OFFSETS = [i for i in range(-23, 1)]
 ACTION_HORIZON = 24
 
 OBS_TO_VIDEO_KEY = {
