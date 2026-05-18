@@ -94,6 +94,10 @@ action_head_cfg:
     noise_beta_beta: 1.0
     noise_s: 0.999
     num_timestep_buckets: 1000
+    use_value_reconstruction_loss: true
+    value_reconstruction_loss_weight: 0.2
+    value_reconstruction_index: -1
+    value_reconstruction_huber_delta: 0.05
 
     # ========== DECOUPLED NOISE SAMPLING CONFIG ==========
     # When true: video uses Beta(alpha,beta) biased high, action uses independent uniform
