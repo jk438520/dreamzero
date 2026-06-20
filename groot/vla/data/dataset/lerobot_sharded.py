@@ -1518,6 +1518,13 @@ class ShardedLeRobotMixtureDataset(LeRobotMixtureDataset, IterableDataset):
                 step_data = dataset.get_step_data(trajectory_id, indices)
                 # Skip samples where state or action would be empty
                 if step_data is not None:
+                    self._log_episode_sample(
+                        dataset=dataset,
+                        trajectory_id=trajectory_id,
+                        step_index=step_index,
+                        dataset_index=dataset_index,
+                        shard_index=shard_index,
+                    )
                     yield dataset.transforms(step_data)
 
             # Delete the cached shard and shard start indices to free up memory

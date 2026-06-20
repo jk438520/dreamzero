@@ -543,6 +543,13 @@ class WANPolicyHead(ActionHead):
             )
 
         return crossattn_cache, crossattn_cache_neg
+
+    def clear_kv_cache(self) -> None:
+        self.kv_cache1 = None
+        self.kv_cache_neg = None
+        self.crossattn_cache = None
+        self.crossattn_cache_neg = None
+        self.current_start_frame = 0
         
     def sample_time(self, batch_size, device, dtype):
         sample = self.beta_dist.sample([batch_size]).to(device, dtype=dtype)
@@ -831,7 +838,12 @@ class WANPolicyHead(ActionHead):
                 action_loss_per_sample = torch.nn.functional.mse_loss(
                     action_noise_pred.float(), training_target_action.float(), reduction='none'
                 ) * action_mask  # shape: [B, ...]
-                action_loss_per_sample = has_real_action[:, None].float() * action_loss_per_sample  # apply has_real_action
+                
+                # print shapes of everything important
+                print("action_loss_per_sample", action_loss_per_sample.shape)
+                print("has_real_action", has_real_action.shape)
+                
+                action_loss_per_sample = has_real_action[:, None, None].float() * action_loss_per_sample  # apply has_real_action
                 weight_action = action_loss_per_sample.mean(dim=2) * self.scheduler.training_weight(
                     timestep_action.flatten(0, 1),
                 ).unflatten(0, (noise_action.shape[0], noise_action.shape[1])).to(self._device)

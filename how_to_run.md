@@ -17,3 +17,11 @@ From `/lute/guests/guest/jakkol/dreamzero`
 ```
 ./scripts/run_eval_value_function.sh
 ```
+
+### Open-loop evaluation
+```bash
+./scripts/run_open_loop_yam.sh
+./scripts/run_open_loop_droid_vf.sh
+./scripts/run_open_loop_droid_vf_long_context.sh
+./scripts/run_open_loop_droid_vf_trainstyle.sh
+```

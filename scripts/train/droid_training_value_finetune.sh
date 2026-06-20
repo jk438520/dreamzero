@@ -99,7 +99,7 @@ torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment
     tf32=true \
     eval_bf16=true \
     dataloader_pin_memory=false \
-    dataloader_num_workers=1 \
+    dataloader_num_workers=4 \
     image_resolution_width=320 \
     image_resolution_height=176 \
     save_lora_only=false \
@@ -114,7 +114,7 @@ torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment
     tokenizer_path=$TOKENIZER_DIR \
     pretrained_model_path=$PRETRAINED_MODEL_PATH \
     ++action_head_cfg.config.use_value_reconstruction_loss=true \
-    ++action_head_cfg.config.value_reconstruction_loss_weight=1 \
+    ++action_head_cfg.config.value_reconstruction_loss_weight=5 \
     ++action_head_cfg.config.value_reconstruction_index=-1 \
     ++action_head_cfg.config.value_reconstruction_huber_delta=0.01 \
     ++action_head_cfg.config.lora_rank=$LORA_RANK \

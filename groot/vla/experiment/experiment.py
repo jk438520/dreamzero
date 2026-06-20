@@ -11,6 +11,8 @@ import torch
 from groot.vla.experiment.base import BaseExperiment, BaseTrainer
 from groot.vla.utils.action_args_override_utils import apply_action_overrides
 
+from torch.profiler import profile, ProfilerActivity
+
 logger = logging.getLogger(__name__)
 
 
@@ -127,9 +129,16 @@ def main(cfg):
     # Automatically update action dim and action horizon keys if specified in the config
     cfg = apply_action_overrides(cfg)
 
+    # with profile(
+    #     activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU], # <--- Include memory profiling
+    #     profile_memory=True, # <--- Crucial for memory profiling
+    #     record_shapes=True,
+    #     on_trace_ready=torch.profiler.tensorboard_trace_handler('./log_dir'),
+    # ) as prof:
+    # torch.cuda.memory._record_memory_history()
     experiment = VLAExperiment(cfg)
     experiment.train()
-
+    # torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
 
 if __name__ == "__main__":
     main()
