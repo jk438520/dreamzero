@@ -47,6 +47,8 @@ ACTION_KEY_ORDER = [
     "action.value_function",
 ]
 
+ACTION_HORIZON = 24
+
 DEFAULT_PLACEHOLDER_FRAME_SHAPE = (256, 256, 3)
 
 def build_droid_modality_configs() -> dict[str, ModalityConfig]:
@@ -146,6 +148,31 @@ def get_gt_action_dict(dataset, idx: int) -> dict:
     return gt
 
 
+def get_gt_action_batch_dict(dataset, idx: int, horizon: int = ACTION_HORIZON) -> dict | None:
+    """Return a horizon-long GT action chunk for each key.
+
+    The evaluator compares the full predicted action chunk against the matching
+    ground-truth chunk, so we fetch a window of action targets instead of a
+    single timestep.
+    """
+    trajectory_id, base_index = dataset.all_steps[idx]
+    traj_data = dataset.get_trajectory_data(trajectory_id)
+    traj_len = len(traj_data)
+    end_index = base_index + horizon
+    if end_index > traj_len:
+        return None
+
+    dataset.curr_traj_data = traj_data
+    dataset.curr_traj_id = trajectory_id
+
+    gt = {}
+    step_indices = np.arange(base_index, end_index)
+    for key in ACTION_KEY_ORDER:
+        values = dataset.get_data_by_modality(trajectory_id, "action", key, step_indices)
+        gt[key] = np.asarray(values)
+    return gt
+
+
 def get_dataset_prompt(dataset, idx: int) -> str:
     trajectory_id, base_index = dataset.all_steps[idx]
     traj_data = dataset.get_trajectory_data(trajectory_id)
@@ -165,10 +192,32 @@ def get_dataset_prompt(dataset, idx: int) -> str:
     return "pick up the object"
 
 
+def normalize_action_chunk(values) -> np.ndarray:
+    """Normalize an action chunk to shape (horizon, dim).
+
+    Some action heads emit a trailing singleton dimension for scalar channels,
+    while others already return a 2D horizon-by-dim tensor. This helper makes
+    the evaluator treat both cases uniformly.
+    """
+    array = np.asarray(values)
+    if array.ndim == 0:
+        return array.reshape(1, 1)
+    if array.ndim >= 3 and array.shape[0] == 1:
+        array = array[0]
+    if array.ndim == 1:
+        return array[:, None]
+    if array.ndim > 2:
+        return array.reshape(-1, array.shape[-1])
+    return array
+
+
 def save_plots(all_preds, all_gts, key_names, output_dir):
     """Plot pred vs gt for each action dimension across all keys."""
-    pred_flat = np.concatenate([all_preds[k] for k in key_names], axis=-1)
-    gt_flat = np.concatenate([all_gts[k] for k in key_names], axis=-1)
+    def flatten_action_batches(values):
+        return normalize_action_chunk(values)
+
+    pred_flat = np.concatenate([flatten_action_batches(all_preds[k]) for k in key_names], axis=-1)
+    gt_flat = np.concatenate([flatten_action_batches(all_gts[k]) for k in key_names], axis=-1)
     dim_count = pred_flat.shape[1]
     mse_dim = np.mean((pred_flat - gt_flat) ** 2, axis=0)
 
@@ -245,40 +294,45 @@ def evaluate(args, context_length: int = 1):
     dataset = make_droid_dataset(args.dataset_path)
     os.makedirs(args.output_dir, exist_ok=True)
 
-    num = min(args.num_samples, len(dataset))
+    eval_stride = ACTION_HORIZON
+    max_samples = max(0, (len(dataset) - args.start_idx + eval_stride - 1) // eval_stride)
+    num = min(args.num_samples, max_samples)
     preds_per_key = {k: [] for k in ACTION_KEY_ORDER}
     gts_per_key = {k: [] for k in ACTION_KEY_ORDER}
     times = []
 
-    print(f"\nEvaluating {num} samples (start={args.start_idx}, context_length={context_length}) ...")
+    print(
+        f"\nEvaluating {num} samples (start={args.start_idx}, context_length={context_length}, "
+        f"eval_stride={eval_stride}) ..."
+    )
     print("-" * 60)
 
     for i in range(num):
-        idx = args.start_idx + i
+        idx = args.start_idx + i * eval_stride
 
         prompt = args.prompt
         if args.use_dataset_prompt:
             prompt = get_dataset_prompt(dataset, idx)
 
         obs = build_obs(dataset, idx, prompt, context_length=context_length)
-
+    
         t0 = time.perf_counter()
         with torch.inference_mode():
             result, _ = policy.lazy_joint_forward_causal(Batch(obs=obs))
         elapsed = time.perf_counter() - t0
         times.append(elapsed)
 
-        gt = get_gt_action_dict(dataset, idx)
+        gt = get_gt_action_batch_dict(dataset, idx, horizon=eval_stride)
+        if gt is None:
+            continue
 
         for key in ACTION_KEY_ORDER:
             if key in result.act:
                 pred_val = result.act[key]
                 if isinstance(pred_val, torch.Tensor):
                     pred_val = pred_val.cpu().numpy()
-                # Policy output is horizon-shaped; compare the first predicted step here.
-                pred_val = np.atleast_1d(pred_val[0]).flatten()
-                preds_per_key[key].append(pred_val)
-                gts_per_key[key].append(gt[key])
+                preds_per_key[key].append(normalize_action_chunk(pred_val))
+                gts_per_key[key].append(normalize_action_chunk(gt[key]))
 
         if i % args.log_every == 0:
             if i == 0:
@@ -287,11 +341,11 @@ def evaluate(args, context_length: int = 1):
                     if key in result.act:
                         value = result.act[key]
                         shape = value.shape if hasattr(value, "shape") else "?"
-                        print(f"    {key}: pred_shape={shape}, gt_shape={gt[key].shape}")
+                        print(f"    {key}: pred_shape={shape}, gt_shape={normalize_action_chunk(gt[key]).shape}")
             print(f"  [{i:>5d}/{num}] idx={idx} infer={elapsed:.3f}s prompt={repr(prompt)[:60]}")
 
-        if hasattr(policy.trained_model, "action_head") and hasattr(policy.trained_model.action_head, "clear_kv_cache"):
-            policy.trained_model.action_head.clear_kv_cache()
+        # if hasattr(policy.trained_model, "action_head") and hasattr(policy.trained_model.action_head, "clear_kv_cache"):
+        #     policy.trained_model.action_head.clear_kv_cache()
 
     valid_keys = [k for k in ACTION_KEY_ORDER if len(preds_per_key[k]) > 0]
     if not valid_keys:

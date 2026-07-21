@@ -1180,19 +1180,22 @@ class WANPolicyHead(ActionHead):
                 print("image shape@@", image.shape)
         elif self.current_start_frame != 0:
             # this is for real world execution
-            if (videos.shape[2] - 1) // 4 == self.num_frame_per_block:
-                print("no further action")
-            elif videos.shape[2] // 4 != self.num_frame_per_block:
-                # Repeating videos along dim 2.
-                repeat_factor = self.num_frame_per_block // (videos.shape[2] // 4)
-                videos = torch.repeat_interleave(videos, repeat_factor, dim=2)
-            
-                first_frame = videos[:, :, 0:1]  # Extract first frame
-                videos = torch.cat([first_frame, videos], dim=2)
-            else: 
-                first_frame = videos[:, :, 0:1]  # Extract first frame
-                videos = torch.cat([first_frame, videos], dim=2)
-           
+            target_raw_frames = 1 + (self.num_frame_per_block * 4)
+
+            if videos.shape[2] > target_raw_frames:
+                # Keep the most recent temporal window expected by the action head.
+                videos = videos[:, :, -target_raw_frames:]
+            elif videos.shape[2] < target_raw_frames:
+                # Pad short clips by repeating the final frame so the VAE sees a valid window.
+                pad_count = target_raw_frames - videos.shape[2]
+                last_frame = videos[:, :, -1:]
+                videos = torch.cat([videos, last_frame.repeat(1, 1, pad_count, 1, 1)], dim=2)
+
+            first_frame = videos[:, :, :1]  # Extract first frame
+            videos = torch.cat([first_frame, videos], dim=2)
+            print("videoes post adjust", videos.shape)
+                
+            print(f"WanPoliocyHead: videos shape after processing: {videos.shape}")
             image = self.vae.encode(
                 videos,
                 tiled=self.tiled,

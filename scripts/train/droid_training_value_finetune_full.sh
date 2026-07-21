@@ -29,8 +29,8 @@ MAX_STEPS=${MAX_STEPS:-400}
 WARMUP_RATIO=${WARMUP_RATIO:-0.05}
 LR_SCHEDULER_TYPE=${LR_SCHEDULER_TYPE:-cosine}
 # LoRA knobs
-LORA_RANK=${LORA_RANK:-16}
-LORA_ALPHA=${LORA_ALPHA:-16}
+LORA_RANK=${LORA_RANK:-4}
+LORA_ALPHA=${LORA_ALPHA:-4}
 # For polynomial scheduler: quick early decay and flat low-LR tail near the end.
 LR_END=${LR_END:-1e-6}
 LR_POWER=${LR_POWER:-3.0}
@@ -73,7 +73,7 @@ torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment
     report_to=wandb \
     data=dreamzero/droid_value_relative \
     wandb_project=dreamzero \
-    train_architecture=lora \
+    train_architecture=full \
     num_frames=33 \
     action_horizon=24 \
     num_views=3 \
@@ -90,7 +90,7 @@ torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment
     training_args.warmup_ratio=$WARMUP_RATIO \
     training_args.lr_scheduler_type=$LR_SCHEDULER_TYPE \
     output_dir=$OUTPUT_DIR \
-    per_device_train_batch_size=4 \
+    per_device_train_batch_size=1 \
     max_steps=$MAX_STEPS \
     weight_decay=1e-5 \
     save_total_limit=5 \
@@ -114,12 +114,12 @@ torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment
     tokenizer_path=$TOKENIZER_DIR \
     pretrained_model_path=$PRETRAINED_MODEL_PATH \
     ++action_head_cfg.config.use_value_reconstruction_loss=false \
-    ++action_head_cfg.config.value_reconstruction_loss_weight=0 \
-    ++action_head_cfg.config.value_reconstruction_index=-1 \
-    ++action_head_cfg.config.value_reconstruction_huber_delta=0.01 \
-    ++action_head_cfg.config.lora_rank=$LORA_RANK \
-    ++action_head_cfg.config.lora_alpha=$LORA_ALPHA \
-    ++action_head_cfg.config.skip_component_loading=true \
-    ++action_head_cfg.config.defer_lora_injection=true \
     ++training_args.lr_scheduler_kwargs.lr_end=$LR_END \
     ++training_args.lr_scheduler_kwargs.power=$LR_POWER 
+
+    # ++action_head_cfg.config.value_reconstruction_loss_weight=0 \
+    # ++action_head_cfg.config.value_reconstruction_index=-1 \
+    # ++action_head_cfg.config.value_reconstruction_huber_delta=0.01 \
+    # ++action_head_cfg.config.lora_rank=$LORA_RANK \
+    # ++action_head_cfg.config.lora_alpha=$LORA_ALPHA \
+
