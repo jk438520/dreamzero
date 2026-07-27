@@ -113,10 +113,6 @@ torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment
     vae_pretrained_path=$WAN_CKPT_DIR/Wan2.1_VAE.pth \
     tokenizer_path=$TOKENIZER_DIR \
     pretrained_model_path=$PRETRAINED_MODEL_PATH \
-    ++action_head_cfg.config.use_value_reconstruction_loss=false \
-    ++action_head_cfg.config.value_reconstruction_loss_weight=0 \
-    ++action_head_cfg.config.value_reconstruction_index=-1 \
-    ++action_head_cfg.config.value_reconstruction_huber_delta=0.01 \
     ++action_head_cfg.config.lora_rank=$LORA_RANK \
     ++action_head_cfg.config.lora_alpha=$LORA_ALPHA \
     ++action_head_cfg.config.skip_component_loading=true \
