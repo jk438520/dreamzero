@@ -124,10 +124,6 @@ class WANPolicyHeadConfig(PretrainedConfig):
     num_timestep_buckets: int = field(
         default=1000, metadata={"help": "Number of timestep discretization buckets."}
     )
-    use_value_reconstruction_loss: bool = field(
-        default=False,
-        metadata={"help": "Add auxiliary reconstruction loss on action.value_function channel."},
-    )
     num_inference_timesteps: int = field(
         default=None,
         metadata={"help": "Number of inference steps for noise diffusion."},
@@ -803,18 +799,12 @@ class WANPolicyHead(ActionHead):
                 action_loss_per_sample = torch.nn.functional.mse_loss(
                     action_noise_pred.float(), training_target_action.float(), reduction='none'
                 ) * action_mask  # shape: [B, ...]
-                
                 action_loss_per_sample = has_real_action[:, None, None].float() * action_loss_per_sample  # apply has_real_action
                 weight_action = action_loss_per_sample.mean(dim=2) * self.scheduler.training_weight(
                     timestep_action.flatten(0, 1),
                 ).unflatten(0, (noise_action.shape[0], noise_action.shape[1])).to(self._device)
                 weighted_action_loss = weight_action.mean()
-
-                
-                loss = (
-                    weighted_dynamics_loss
-                    + weighted_action_loss
-                )
+                loss = weighted_dynamics_loss + weighted_action_loss
             else:
                 weighted_action_loss = torch.tensor(0.0, device=self._device)
                 loss = weighted_dynamics_loss
