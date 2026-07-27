@@ -29,8 +29,8 @@ MAX_STEPS=${MAX_STEPS:-400}
 WARMUP_RATIO=${WARMUP_RATIO:-0.05}
 LR_SCHEDULER_TYPE=${LR_SCHEDULER_TYPE:-cosine}
 # LoRA knobs
-LORA_RANK=${LORA_RANK:-16}
-LORA_ALPHA=${LORA_ALPHA:-16}
+LORA_RANK=${LORA_RANK:-32}
+LORA_ALPHA=${LORA_ALPHA:-32}
 # For polynomial scheduler: quick early decay and flat low-LR tail near the end.
 LR_END=${LR_END:-1e-6}
 LR_POWER=${LR_POWER:-3.0}
@@ -90,7 +90,7 @@ torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment
     training_args.warmup_ratio=$WARMUP_RATIO \
     training_args.lr_scheduler_type=$LR_SCHEDULER_TYPE \
     output_dir=$OUTPUT_DIR \
-    per_device_train_batch_size=4 \
+    per_device_train_batch_size=1 \
     max_steps=$MAX_STEPS \
     weight_decay=1e-5 \
     save_total_limit=5 \
