@@ -160,7 +160,38 @@ def collate(features: List[dict], tokenizer: AutoTokenizer, num_views=3, embodim
             batch['text_attention_mask_negative'] = mask
         else:
             values = [elem[key] for elem in features]
-            batch[key] = torch.from_numpy(np.stack(values))
+            try:
+                stacked_values = np.stack(values)
+            except Exception as e:
+                print(f"[collate-debug] np.stack failed for key='{key}' with batch_size={len(values)}")
+                for i, value in enumerate(values):
+                    value_type = type(value)
+                    value_shape = getattr(value, "shape", None)
+                    value_dtype = getattr(value, "dtype", None)
+                    preview = str(value)
+                    if len(preview) > 200:
+                        preview = preview[:200] + "..."
+                    print(
+                        f"[collate-debug] item[{i}] type={value_type}, "
+                        f"shape={value_shape}, dtype={value_dtype}, preview={preview}"
+                    )
+                raise
+
+            try:
+                batch[key] = torch.from_numpy(stacked_values)
+            except Exception as e:
+                print(f"[collate-debug] torch.from_numpy failed for key='{key}'")
+                print(
+                    f"[collate-debug] stacked dtype={stacked_values.dtype}, "
+                    f"shape={stacked_values.shape}"
+                )
+                if stacked_values.size > 0:
+                    first_elem = stacked_values.flat[0]
+                    print(
+                        f"[collate-debug] first stacked element type={type(first_elem)}, "
+                        f"value={first_elem}"
+                    )
+                raise
     return batch
 
 

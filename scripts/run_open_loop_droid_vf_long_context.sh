@@ -2,12 +2,12 @@
 
 set -eu
 
-MODEL_PATH="${MODEL_PATH:-./checkpoints/DreamZero-DROID}"
+MODEL_PATH="${MODEL_PATH:-./checkpoints/dreamzero_droid_finetune_full_1_traj_with_value_function_v3}"
 DATASET_PATH="${DATASET_PATH:-./data/droid_lerobot_1_traj_with_value_function}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-6,7}"
 DEVICE="${DEVICE:-cuda}"
 PROMPT="${PROMPT:-pick up the object}"
-OUTPUT_DIR="${OUTPUT_DIR:-./results_droid_vf_long_context_base}"
+OUTPUT_DIR="${OUTPUT_DIR:-./results_droid_vf_long_context_big_lora}"
 # Use a large default; the Python eval loop clamps to the dataset length,
 # so this evaluates the full episode unless you override NUM_SAMPLES.
 NUM_SAMPLES="${NUM_SAMPLES:-999}"

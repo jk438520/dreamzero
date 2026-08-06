@@ -1890,6 +1890,8 @@ class CachedLeRobotSingleDataset(LeRobotSingleDataset):
         key = key.replace("video.", "")
         # Calculate the absolute indices
         absolute_indices = self.start_indices[trajectory_index] + step_indices
+        print(f"[dataset-debug][get_video] trajectory_index: {trajectory_index},"
+              f" trajectory_id: {trajectory_id}, key: {key}, step_indices: {step_indices}, absolute_indices: {absolute_indices}")
         return self.cached_frames[key][absolute_indices]
 
 

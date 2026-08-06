@@ -6,9 +6,10 @@ if [ -n "${TRAIN_LOG_FILE:-}" ]; then
 fi
 
 export DROID_DATA_ROOT="./data/droid_lerobot_1_traj_with_value_function"
-export OUTPUT_DIR="./checkpoints/dreamzero_droid_finetune_full_1_traj_with_value_function_big_lora_temp"
-export NUM_GPUS=1
-export CUDA_VISIBLE_DEVICES=7
+export OUTPUT_DIR="./checkpoints/dreamzero_droid_finetune_1_traj_full"
+export NUM_GPUS=2
+export CUDA_VISIBLE_DEVICES=6,7
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 # Longer low-LR tail profile
 export LEARNING_RATE=8e-5
@@ -22,4 +23,4 @@ export SAVE_STEPS=400
 # Optional: start from your latest run checkpoint/model dir
 # export PRETRAINED_MODEL_PATH="./checkpoints/dreamzero_droid_finetune_lora_10_traj_with_value_function"
 
-./scripts/train/droid_training_value_finetune.sh
+./scripts/train/droid_training_value_finetune_full.sh
