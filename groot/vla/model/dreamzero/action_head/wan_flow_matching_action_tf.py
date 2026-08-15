@@ -527,6 +527,13 @@ class WANPolicyHead(ActionHead):
             )
 
         return crossattn_cache, crossattn_cache_neg
+
+    def clear_kv_cache(self) -> None:
+        self.kv_cache1 = None
+        self.kv_cache_neg = None
+        self.crossattn_cache = None
+        self.crossattn_cache_neg = None
+        self.current_start_frame = 0
         
     def sample_time(self, batch_size, device, dtype):
         sample = self.beta_dist.sample([batch_size]).to(device, dtype=dtype)
@@ -792,7 +799,7 @@ class WANPolicyHead(ActionHead):
                 action_loss_per_sample = torch.nn.functional.mse_loss(
                     action_noise_pred.float(), training_target_action.float(), reduction='none'
                 ) * action_mask  # shape: [B, ...]
-                action_loss_per_sample = has_real_action[:, None].float() * action_loss_per_sample  # apply has_real_action
+                action_loss_per_sample = has_real_action[:, None, None].float() * action_loss_per_sample  # apply has_real_action
                 weight_action = action_loss_per_sample.mean(dim=2) * self.scheduler.training_weight(
                     timestep_action.flatten(0, 1),
                 ).unflatten(0, (noise_action.shape[0], noise_action.shape[1])).to(self._device)
@@ -1079,19 +1086,22 @@ class WANPolicyHead(ActionHead):
                 print("image shape@@", image.shape)
         elif self.current_start_frame != 0:
             # this is for real world execution
-            if (videos.shape[2] - 1) // 4 == self.num_frame_per_block:
-                print("no further action")
-            elif videos.shape[2] // 4 != self.num_frame_per_block:
-                # Repeating videos along dim 2.
-                repeat_factor = self.num_frame_per_block // (videos.shape[2] // 4)
-                videos = torch.repeat_interleave(videos, repeat_factor, dim=2)
-            
-                first_frame = videos[:, :, 0:1]  # Extract first frame
-                videos = torch.cat([first_frame, videos], dim=2)
-            else: 
-                first_frame = videos[:, :, 0:1]  # Extract first frame
-                videos = torch.cat([first_frame, videos], dim=2)
-           
+            target_raw_frames = 1 + (self.num_frame_per_block * 4)
+
+            if videos.shape[2] > target_raw_frames:
+                # Keep the most recent temporal window expected by the action head.
+                videos = videos[:, :, -target_raw_frames:]
+            elif videos.shape[2] < target_raw_frames:
+                # Pad short clips by repeating the final frame so the VAE sees a valid window.
+                pad_count = target_raw_frames - videos.shape[2]
+                last_frame = videos[:, :, -1:]
+                videos = torch.cat([videos, last_frame.repeat(1, 1, pad_count, 1, 1)], dim=2)
+
+            first_frame = videos[:, :, :1]  # Extract first frame
+            videos = torch.cat([first_frame, videos], dim=2)
+            print("videoes post adjust", videos.shape)
+                
+            print(f"WanPoliocyHead: videos shape after processing: {videos.shape}")
             image = self.vae.encode(
                 videos,
                 tiled=self.tiled,

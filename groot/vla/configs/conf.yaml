@@ -46,11 +46,11 @@ upload_last_n_checkpoints: 5
 remove_unused_columns: false
 bf16: false
 tf32: false
-global_batch_size: null
+global_batch_size: 8
 raise_error_if_global_batch_size_not_set: false
 per_device_train_batch_size: 256
 per_device_eval_batch_size: 64
-gradient_accumulation_steps: 1
+gradient_accumulation_steps: 4
 dataloader_num_workers: 10
 dataloader_pin_memory: true
 dataloader_persistent_workers: true

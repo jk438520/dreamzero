@@ -840,10 +840,23 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
                 sampled_indices = np.array(sorted(set(sampled_list)), dtype=int)
             else:
                 sampled_indices = np.array([], dtype=int)
+
+            print(
+                "[dataset-debug][state] "
+                f"episode={trajectory_id} key={key} first_idx={first_idx} "
+                f"target_num_chunks={target_num_chunks} sampled_len={len(sampled_indices)} "
+                f"sampled_indices={sampled_indices.tolist()}"
+            )
         else:
             # Fallback: use provided indices with bounds
             sampled_indices = np.maximum(step_indices, 0)
             sampled_indices = np.minimum(sampled_indices, trajectory_length - 1)
+
+            print(
+                "[dataset-debug][state-fallback] "
+                f"episode={trajectory_id} key={key} sampled_len={len(sampled_indices)} "
+                f"sampled_indices={sampled_indices.tolist()}"
+            )
         
         # print("sampled indices for state", sampled_indices)
 
@@ -1018,10 +1031,24 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
                 sampled_indices = unique_sorted[:divisible_size]
             else:
                 sampled_indices = np.array([], dtype=int)
+
+            print(
+                "[dataset-debug][action] "
+                f"episode={trajectory_id} key={key} first_idx={first_idx} "
+                f"target_num_chunks={target_num_chunks} sampled_len={len(sampled_indices)} "
+                f"num_chunks={len(sampled_indices) // 24}"
+                f"sampled_indices={sampled_indices.tolist()}"
+            )
         else:
             # Fallback: use provided indices with bounds
             sampled_indices = np.maximum(step_indices, 0)
             sampled_indices = np.minimum(sampled_indices, trajectory_length - 1)
+
+            print(
+                "[dataset-debug][action-fallback] "
+                f"episode={trajectory_id} key={key} sampled_len={len(sampled_indices)} "
+                f"sampled_indices={sampled_indices.tolist()}"
+            )
         
         # print("sampled indices for action", first_idx, sampled_indices, trajectory_length)
 
@@ -1235,6 +1262,13 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
             self._current_num_chunks = {}
         # Use first_idx as a key to track the current sample's chunk count
         self._current_num_chunks[first_idx] = num_video_chunks
+
+        print(
+            "[dataset-debug][video] "
+            f"first_idx={first_idx} target_language={target_language} "
+            f"sampled_len={unique_sorted.size} num_video_chunks={num_video_chunks} "
+            f"sampled_indices={unique_sorted.tolist()}"
+        )
         
         # print("unique_sorted size", unique_sorted.size, "num_video_chunks", num_video_chunks)
         return unique_sorted
@@ -1518,6 +1552,13 @@ class ShardedLeRobotMixtureDataset(LeRobotMixtureDataset, IterableDataset):
                 step_data = dataset.get_step_data(trajectory_id, indices)
                 # Skip samples where state or action would be empty
                 if step_data is not None:
+                    self._log_episode_sample(
+                        dataset=dataset,
+                        trajectory_id=trajectory_id,
+                        step_index=step_index,
+                        dataset_index=dataset_index,
+                        shard_index=shard_index,
+                    )
                     yield dataset.transforms(step_data)
 
             # Delete the cached shard and shard start indices to free up memory

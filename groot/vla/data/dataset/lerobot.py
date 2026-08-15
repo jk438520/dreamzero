@@ -4,6 +4,7 @@ import glob
 import hashlib
 import importlib
 import json
+import logging
 from pathlib import Path
 import time
 from typing import Sequence, TypeVar
@@ -45,6 +46,16 @@ LEROBOT_RELATIVE_HORIZON_STATS_FILE_NAME = "meta/relative_horizon_stats_dreamzer
 
 # Special language keys that load from metadata files instead of parquet columns
 METADATA_LANG_KEYS = ["detailed_global_instruction_medium", "detailed_global_instruction_concise"]
+
+logger = logging.getLogger(__name__)
+EPISODE_SAMPLE_LOG_PREFIX = "EPISODE_SAMPLE"
+
+
+def _format_episode_sample_log(**fields) -> str:
+    return " ".join(
+        [EPISODE_SAMPLE_LOG_PREFIX]
+        + [f"{key}={value}" for key, value in fields.items() if value is not None]
+    )
 
 
 def calculate_dataset_statistics(
@@ -1879,6 +1890,8 @@ class CachedLeRobotSingleDataset(LeRobotSingleDataset):
         key = key.replace("video.", "")
         # Calculate the absolute indices
         absolute_indices = self.start_indices[trajectory_index] + step_indices
+        print(f"[dataset-debug][get_video] trajectory_index: {trajectory_index},"
+              f" trajectory_id: {trajectory_id}, key: {key}, step_indices: {step_indices}, absolute_indices: {absolute_indices}")
         return self.cached_frames[key][absolute_indices]
 
 
@@ -2164,6 +2177,27 @@ class LeRobotMixtureDataset(Dataset):
         self.epoch = epoch
         # self.sampled_steps = self.sample_epoch()
 
+    def _log_episode_sample(
+        self,
+        dataset: LeRobotSingleDataset,
+        trajectory_id: int,
+        step_index: int,
+        dataset_index: int | None = None,
+        shard_index: int | None = None,
+    ) -> None:
+        if not self.training:
+            return
+
+        fields = {
+            "epoch": getattr(self, "epoch", None),
+            "dataset": dataset.dataset_name,
+            "dataset_index": dataset_index,
+            "shard_index": shard_index,
+            "episode": int(trajectory_id),
+            "step": int(step_index),
+        }
+        print(_format_episode_sample_log(**fields), flush=True)
+
     def sample_step(self, index: int) -> tuple[LeRobotSingleDataset, int, int]:
         """Sample a single step from the mixture dataset.
 
@@ -2238,6 +2272,7 @@ class LeRobotMixtureDataset(Dataset):
             dict: The data for the trajectory and start index.
         """
         dataset, trajectory_id, step_index = self.sample_step(index)
+        self._log_episode_sample(dataset, trajectory_id, step_index)
         indices = {
             key: delta_indices + step_index for key, delta_indices in dataset.delta_indices.items()
         }

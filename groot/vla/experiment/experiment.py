@@ -11,6 +11,8 @@ import torch
 from groot.vla.experiment.base import BaseExperiment, BaseTrainer
 from groot.vla.utils.action_args_override_utils import apply_action_overrides
 
+from torch.profiler import profile, ProfilerActivity
+
 logger = logging.getLogger(__name__)
 
 
@@ -126,10 +128,8 @@ class VLAExperiment(BaseExperiment):
 def main(cfg):
     # Automatically update action dim and action horizon keys if specified in the config
     cfg = apply_action_overrides(cfg)
-
     experiment = VLAExperiment(cfg)
     experiment.train()
-
 
 if __name__ == "__main__":
     main()
